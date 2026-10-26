@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Key-only root login. A provisioned unit carries its host key in the image;
-# without one, Dropbear generates a key per boot in /var/run/dropbear.
-DROPBEAR_ARGS="-s -r /etc/dropbear/dropbear_ed25519_host_key"
+# Root login with a password or a key. A provisioned unit can also carry an
+# authorized key in the image; without one, Dropbear generates a host key per
+# boot in /var/run/dropbear.
+DROPBEAR_ARGS="-r /etc/dropbear/dropbear_ed25519_host_key"

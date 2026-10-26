@@ -1,8 +1,11 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# Bootstrap initramfs: mount the read-only SquashFS root under a RAM overlay and
-# switch to it. The installed system reads the root from UBI volume `rootfs`
-# (ubiblock0_3); the recovery image carries it here as /rootfs.squashfs.
+# Bootstrap initramfs for both installed and recovery boots.
+#
+# system: mount the SquashFS root, mount the UBI `data` volume, and put the
+#         writable overlay upper/work on it. If data or its overlay cannot be
+#         mounted, fall back to a RAM overlay and keep booting (degraded).
+# recovery: no /data, no UBI access, RAM overlay only.
 set -u
 bb=/bin/busybox
 fail()
@@ -11,22 +14,84 @@ fail()
 	echo "<3>W1700K_BOOTSTRAP_FAILED: $*" > /dev/kmsg 2>/dev/null
 	exit 1
 }
+degraded()
+{
+	echo "W1700K_BOOT_DEGRADED: $*" >&2
+	echo "<3>W1700K_BOOT_DEGRADED: $*" > /dev/kmsg 2>/dev/null
+}
 
 $bb mount -t devtmpfs devtmpfs /dev || fail "cannot mount devtmpfs"
-if $bb test -f /rootfs.squashfs; then
-	$bb mount -t squashfs -o loop,ro,noatime /rootfs.squashfs /lower ||
-		fail "cannot mount the RAM root"
-else
-	$bb test -b /dev/ubiblock0_3 || fail "UBI volume rootfs (ubiblock0_3) is absent"
-	$bb mount -t squashfs -o ro,noatime /dev/ubiblock0_3 /lower ||
-		fail "cannot mount the root from UBI"
+$bb mount -t proc proc /proc || fail "cannot mount proc"
+$bb mount -t sysfs sysfs /sys || fail "cannot mount sysfs"
+$bb mount -t squashfs -o loop,ro,noatime /rootfs.squashfs /lower ||
+	fail "cannot mount the SquashFS root"
+
+mode=system
+for arg in $($bb cat /proc/cmdline); do
+	case $arg in
+	sdr.mode=*) mode=${arg#sdr.mode=} ;;
+	esac
+done
+
+$bb mkdir -p /newroot
+
+data_ok=0
+if [ "$mode" = system ]; then
+	# ubi.mtd=ubi is attached by the kernel; wait briefly for the volume.
+	i=0
+	while [ ! -e /dev/ubi0 ] && [ "$i" -lt 20 ]; do
+		$bb sleep 0.25
+		i=$((i + 1))
+	done
+	if [ -e /dev/ubi0 ] &&
+	   $bb mount -t ubifs -o noatime ubi0:data /data; then
+		$bb mkdir -p /data/overlay/upper /data/overlay/work \
+			/data/logs /data/recordings /data/spectrumd ||
+			degraded "cannot create the data directories"
+		if ! $bb mount -t overlay \
+			-o lowerdir=/lower,upperdir=/data/overlay/upper,workdir=/data/overlay/work \
+			overlay /newroot; then
+			# A crashed overlay mount can leave only its work directory dirty.
+			$bb rm -rf /data/overlay/work
+			$bb mkdir -p /data/overlay/work
+			$bb mount -t overlay \
+				-o lowerdir=/lower,upperdir=/data/overlay/upper,workdir=/data/overlay/work \
+				overlay /newroot
+		fi
+		if [ $? -eq 0 ]; then
+			data_ok=1
+		elif $bb mount -t overlay \
+			-o userxattr,lowerdir=/lower,upperdir=/data/overlay/upper,workdir=/data/overlay/work \
+			overlay /newroot; then
+			data_ok=1
+		fi
+	fi
+	if [ "$data_ok" -ne 1 ]; then
+		degraded "data volume or overlay unavailable; using a RAM overlay"
+	fi
 fi
-$bb mount -t tmpfs -o size=64M,mode=0755 tmpfs /ram || fail "cannot mount the overlay tmpfs"
-$bb mkdir -p /ram/upper /ram/work
-$bb mount -t overlay -o lowerdir=/lower,upperdir=/ram/upper,workdir=/ram/work \
-	overlay /newroot || fail "cannot mount the overlay root"
-$bb mkdir -p /newroot/.lower /newroot/.ram /newroot/proc /newroot/sys /newroot/dev
+
+if [ "$data_ok" -ne 1 ]; then
+	$bb mount -t tmpfs -o size=64M,mode=0755 tmpfs /ram ||
+		fail "cannot mount the RAM overlay"
+	$bb mkdir -p /ram/upper /ram/work
+	$bb mount -t overlay -o lowerdir=/lower,upperdir=/ram/upper,workdir=/ram/work \
+		overlay /newroot || fail "cannot mount the RAM overlay root"
+fi
+
+# Create these inside the mounted overlay: directories made under /newroot
+# before the overlay mount would be hidden by it.
+$bb mkdir -p /newroot/.lower /newroot/.ram /newroot/proc /newroot/sys /newroot/dev ||
+	fail "cannot create the new root directories"
 $bb mount --move /lower /newroot/.lower || fail "cannot move the lower root"
-$bb mount --move /ram /newroot/.ram || fail "cannot move the overlay tmpfs"
+if [ "$data_ok" -ne 1 ]; then
+	$bb mount --move /ram /newroot/.ram || fail "cannot move the RAM overlay"
+fi
+if [ "$data_ok" -eq 1 ]; then
+	$bb mkdir -p /newroot/data
+	$bb mount --move /data /newroot/data || fail "cannot move the data volume"
+fi
+$bb mount --move /proc /newroot/proc || fail "cannot move proc"
+$bb mount --move /sys /newroot/sys || fail "cannot move sysfs"
 $bb mount --move /dev /newroot/dev || fail "cannot move devtmpfs"
 exec $bb switch_root /newroot /sbin/init

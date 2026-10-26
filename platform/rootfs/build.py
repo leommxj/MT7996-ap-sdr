@@ -80,16 +80,16 @@ def fw_env_config():
     """/etc/fw_env.config, derived from the loader's environment location.
 
     A file that disagrees with U-Boot would corrupt the redundant pair, so it is
-    generated from the loader defconfig rather than maintained beside it.
+    generated from the chainloader defconfig rather than maintained beside it.
     """
-    config = kconfig(PLATFORM / 'loader/an7581_w1700k_sdr_defconfig')
+    config = kconfig(PLATFORM / 'chainloader/configs/an7581_xr1710g_chainloader_defconfig')
     require(config.get('CONFIG_ENV_IS_IN_UBI') == 'y' and
             config.get('CONFIG_ENV_REDUNDANT') == 'y',
             'the loader environment is not a redundant UBI pair')
     size = int(config['CONFIG_ENV_SIZE'], 0)
     primary = config['CONFIG_ENV_UBI_VOLUME'].strip('"')
     secondary = config['CONFIG_ENV_UBI_VOLUME_REDUND'].strip('"')
-    return ('# Generated from the loader defconfig; must match U-Boot.\n'
+    return ('# Generated from the chainloader defconfig; must match U-Boot.\n'
             '# <device> <offset> <size>\n'
             f'/dev/ubi0:{primary} 0x0 {size:#x}\n'
             f'/dev/ubi0:{secondary} 0x0 {size:#x}\n')
@@ -160,9 +160,7 @@ def check_image():
     require(struct.unpack_from('<I', data, 12)[0] == 131072 and
             struct.unpack_from('<H', data, 20)[0] == 6,
             'the root is not a 128 KiB-block zstd SquashFS')
-    require(len(data) <= partitions.ROOTFS_VOLUME_BYTES,
-            f'the root is {len(data)} bytes, over the {partitions.ROOTFS_VOLUME_BYTES}-byte '
-            'rootfs volume')
+    # The root is embedded in the FIT; the FIT limits are checked there.
     return len(data)
 
 

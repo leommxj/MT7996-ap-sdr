@@ -1,41 +1,53 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# Check the storage invariants of a normal boot: read-only SquashFS root under a
-# RAM overlay, `system` attached read-only, `durable` detached, and no NAND
-# erase, program or remap since power-on. Prints W1700K_STORAGE_READY on success.
-set -eu
+# Check the storage invariants of a normal boot: SquashFS lower under an
+# overlay whose upper is the UBI data volume, the expected UBI volumes, and
+# only tmpfs for the volatile directories. Recovery boots skip NAND checks.
+# A data/overlay failure prints W1700K_STORAGE_DEGRADED and exits non-zero; it
+# does not stop the boot.
+set -u
 . /etc/w1700k/storage.conf
-fail() { echo "W1700K_STORAGE_FAILED: $*" >&2; exit 1; }
+fail() { echo "W1700K_STORAGE_DEGRADED: $*" >&2; exit 1; }
+
+mode=system
+for arg in $(cat /proc/cmdline); do
+	case $arg in
+	sdr.mode=*) mode=${arg#sdr.mode=} ;;
+	esac
+done
 
 grep -Eq '^overlay / overlay rw,.*lowerdir=' /proc/mounts || fail "root is not OverlayFS"
 grep -Eq ' /\.lower squashfs ro[, ]' /proc/mounts || fail "lower root is not read-only SquashFS"
-for row in "/run:$RUN_SIZE" "/tmp:$TMP_SIZE" "/var/tmp:$VAR_TMP_SIZE" "/work:$WORK_SIZE"; do
+for row in "/run:$RUN_SIZE" "/tmp:$TMP_SIZE" "/var/tmp:$VAR_TMP_SIZE" \
+	   "/work:$WORK_SIZE" "/var/log:$LOG_SIZE"; do
 	path=${row%%:*}; size=${row#*:}
 	grep -Eq " ${path} tmpfs rw,.*size=${size}" /proc/mounts || fail "$path tmpfs size differs"
 done
 
-# A recovery boot runs the root from RAM; the NAND checks apply to installed boots.
-if grep -Eq '^/dev/ubiblock0_3 /\.lower ' /proc/mounts; then
-	[ "$(cat /sys/class/ubi/ubi0/ro_mode)" = 1 ] || fail "ubi0 is not read-only"
-	[ "$(cat /sys/class/ubi/ubi0_2/name)" = fit ] || fail "volume 2 is not fit"
-	[ "$(cat /sys/class/ubi/ubi0_3/name)" = rootfs ] || fail "volume 3 is not rootfs"
-	! grep -q '"spi-nand0"' /proc/mtd || fail "the writable whole-chip MTD is exposed"
+for node in /dev/ubiblock*; do
+	[ -e "$node" ] && fail "ubiblock is present"
+done
+[ ! -e /sys/kernel/sdr_bmt/counters ] || fail "the BMT layer is loaded"
+
+if [ "$mode" = recovery ]; then
+	echo W1700K_STORAGE_READY
+	exit 0
 fi
 
-for node in /sys/class/mtd/mtd[0-9]*; do
-	case $node in *ro) continue ;; esac
-	[ "$(cat "$node/name")" = durable ] || continue
-	durable_mtd=${node##*mtd}
-	for ubi in /sys/class/ubi/ubi[0-9]*; do
-		[ -r "$ubi/mtd_num" ] || continue
-		[ "$(cat "$ubi/mtd_num")" != "$durable_mtd" ] || fail "durable is attached"
-	done
+grep -q " $DATA_MOUNT ubifs " /proc/mounts || fail "$DATA_MOUNT is not UBIFS"
+grep -Fq "upperdir=$OVERLAY_UPPER" /proc/mounts || fail "root upper is not $OVERLAY_UPPER"
+for path in "$OVERLAY_UPPER" "$OVERLAY_WORK" "$DATA_MOUNT/logs" \
+	    "$DATA_MOUNT/recordings" "$DATA_MOUNT/spectrumd"; do
+	[ -d "$path" ] || fail "$path is missing"
 done
 
-counters=/sys/kernel/sdr_bmt/counters
-[ -r "$counters" ] || fail "BMT counters are absent"
-for name in erase_completed program_completed markbad_completed remap_publications; do
-	value=$(awk -F= -v key="$name" '$1 == key { print $2 }' "$counters")
-	[ "$value" = 0 ] || fail "$name is $value; something wrote NAND during boot"
+[ -d /sys/class/ubi/ubi0 ] || fail "ubi0 is not attached"
+for name in ubootenv ubootenv2 fit_a fit_b recovery data; do
+	found=0
+	for node in /sys/class/ubi/ubi0_*/name; do
+		[ -r "$node" ] || continue
+		[ "$(cat "$node")" = "$name" ] && found=1
+	done
+	[ "$found" -eq 1 ] || fail "UBI volume $name is missing"
 done
 echo W1700K_STORAGE_READY

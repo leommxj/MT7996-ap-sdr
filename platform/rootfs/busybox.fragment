@@ -4,7 +4,7 @@
 # CONFIG_FTPD is not set
 # CONFIG_TFTPD is not set
 # CONFIG_UDHCPD is not set
-# CONFIG_UDHCPC is not set
+CONFIG_UDHCPC=y
 # CONFIG_CROND is not set
 # CONFIG_INETD is not set
 CONFIG_ASH=y

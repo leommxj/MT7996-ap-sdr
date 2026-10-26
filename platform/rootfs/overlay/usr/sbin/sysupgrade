@@ -1,0 +1,109 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Install a unit-specific SDR FIT into the inactive A/B slot and reboot.
+#
+#   sysupgrade /tmp/w1700k-system.itb
+#   sysupgrade --no-reboot /tmp/w1700k-system.itb
+#
+# The FIT is checked for the SDR configuration, this unit's serial and the
+# rootfs attestations before anything is written. The active slot is never
+# touched; the environment is changed only after the new volume reads back.
+set -u
+
+reboot=1
+if [ "${1:-}" = --no-reboot ]; then
+	reboot=0
+	shift
+fi
+fit=${1:-}
+[ -n "$fit" ] && [ -f "$fit" ] || {
+	echo "usage: sysupgrade [--no-reboot] FIT" >&2
+	exit 2
+}
+
+slot=
+for arg in $(cat /proc/cmdline); do
+	case $arg in
+	sdr.slot=*) slot=${arg#sdr.slot=} ;;
+	esac
+done
+[ "$slot" = a ] || [ "$slot" = b ] || {
+	echo "sysupgrade: no running slot in /proc/cmdline" >&2
+	exit 1
+}
+bootslot=$(fw_printenv bootslot 2>/dev/null | sed -n 's/^bootslot=//p')
+[ "$bootslot" = "$slot" ] || {
+	echo "sysupgrade: running slot $slot but bootslot is '$bootslot'" >&2
+	exit 1
+}
+grep -q ' /data ubifs ' /proc/mounts || {
+	echo "sysupgrade: /data is not mounted" >&2
+	exit 1
+}
+[ -d /data/overlay/upper ] || {
+	echo "sysupgrade: /data/overlay/upper is missing" >&2
+	exit 1
+}
+unit=$(cat /etc/w1700k/unit 2>/dev/null || true)
+[ -n "$unit" ] || {
+	echo "sysupgrade: /etc/w1700k/unit is missing" >&2
+	exit 1
+}
+
+# A light FIT check: strings in the FDT. U-Boot verifies the image hashes.
+grep -aq 'conf-sdr' "$fit" || {
+	echo "sysupgrade: FIT has no conf-sdr" >&2
+	exit 1
+}
+for prop in 'sdr,unit' 'sdr,rootfs-sha256' 'sdr,rootfs-size'; do
+	grep -aq "$prop" "$fit" || {
+		echo "sysupgrade: FIT has no $prop" >&2
+		exit 1
+	}
+done
+grep -aq "$unit" "$fit" || {
+	echo "sysupgrade: FIT is not for unit $unit" >&2
+	exit 1
+}
+
+if [ "$slot" = a ]; then inactive=b; else inactive=a; fi
+volume=
+for node in /sys/class/ubi/ubi0_*/name; do
+	[ -r "$node" ] || continue
+	[ "$(cat "$node")" = "fit_$inactive" ] && volume=${node%/name}
+done
+[ -n "$volume" ] || {
+	echo "sysupgrade: UBI volume fit_$inactive is missing" >&2
+	exit 1
+}
+dev=/dev/${volume##*/}
+[ -c "$dev" ] || {
+	echo "sysupgrade: $dev is missing" >&2
+	exit 1
+}
+
+before=$(sha256sum "$fit" | awk '{print $1}')
+echo "sysupgrade: writing $fit to fit_$inactive"
+ubiupdatevol "$dev" "$fit" || {
+	echo "sysupgrade: ubiupdatevol failed" >&2
+	exit 1
+}
+cat "$dev" > /tmp/fit-readback || {
+	echo "sysupgrade: cannot read back fit_$inactive" >&2
+	exit 1
+}
+after=$(sha256sum /tmp/fit-readback | awk '{print $1}')
+rm -f /tmp/fit-readback
+[ "$before" = "$after" ] || {
+	echo "sysupgrade: readback differs ($before != $after)" >&2
+	exit 1
+}
+
+fw_setenv bootslot "$inactive" || exit 1
+fw_setenv upgrade_available 1 || exit 1
+fw_setenv bootcount 0 || exit 1
+fw_setenv bootlimit 3 || exit 1
+sync
+echo "sysupgrade: fit_$inactive written; rebooting into $inactive"
+[ "$reboot" -eq 1 ] && reboot
+exit 0

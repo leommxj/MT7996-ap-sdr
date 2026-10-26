@@ -1,0 +1,73 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Clear the A/B trial only after a healthy boot of the slot U-Boot selected.
+# A shared /data failure is reported but does not roll the slot back.
+set -u
+
+mode=system
+slot=
+for arg in $(cat /proc/cmdline); do
+	case $arg in
+	sdr.mode=*) mode=${arg#sdr.mode=} ;;
+	sdr.slot=*) slot=${arg#sdr.slot=} ;;
+	esac
+done
+[ "$mode" = recovery ] && exit 0
+
+fw_printenv=/usr/sbin/fw_printenv
+fw_setenv=/usr/sbin/fw_setenv
+[ -x "$fw_printenv" ] || fw_printenv=$(command -v fw_printenv || true)
+[ -x "$fw_setenv" ] || fw_setenv=$(command -v fw_setenv || true)
+[ -n "$fw_printenv" ] && [ -n "$fw_setenv" ] || {
+	echo 'bootgood: fw_printenv/fw_setenv are missing' >&2
+	exit 1
+}
+env_get() { "$fw_printenv" "$1" 2>/dev/null | sed -n "s/^$1=//p"; }
+
+trial=$(env_get upgrade_available)
+[ "$trial" = 1 ] || exit 0
+bootslot=$(env_get bootslot)
+if [ -z "$slot" ] || [ "$slot" != "$bootslot" ]; then
+	echo "bootgood: running slot '$slot' is not bootslot '$bootslot'" >&2
+	exit 1
+fi
+
+. /etc/w1700k/network.conf
+slot_ok=1
+[ -d /sys/module/w1700k_sdr ] || slot_ok=0
+health_ifs=${HEALTH_IFS:-${MGMT_IF:-}}
+health_ok=0
+for iface in $health_ifs; do
+	# A PHY link and a DHCP lease can both take several seconds after the
+	# interface is brought up. An interface with carrier but no address is not
+	# management connectivity yet.
+	i=0
+	while [ "$i" -lt 20 ]; do
+		if [ "$(cat "/sys/class/net/$iface/operstate" 2>/dev/null)" = up ] &&
+		   ip addr show dev "$iface" 2>/dev/null | grep -q ' inet '; then
+			health_ok=1
+			break
+		fi
+		sleep 0.5
+		i=$((i + 1))
+	done
+	[ "$health_ok" -eq 1 ] && break
+done
+[ "$health_ok" -eq 1 ] || slot_ok=0
+touch /run/.bootgood 2>/dev/null && rm -f /run/.bootgood || slot_ok=0
+
+data_ok=1
+grep -q ' /data ubifs ' /proc/mounts || data_ok=0
+[ -d /data/overlay/upper ] || data_ok=0
+if [ "$data_ok" -ne 1 ]; then
+	echo 'W1700K_DATA_DEGRADED: shared data/overlay is unavailable' >&2
+fi
+
+if [ "$slot_ok" -ne 1 ]; then
+	echo 'W1700K_SLOT_NOT_GOOD: leaving the trial in place' >&2
+	exit 1
+fi
+"$fw_setenv" upgrade_available 0 || exit 1
+"$fw_setenv" bootlimit 0 || exit 1
+"$fw_setenv" bootcount 0 || exit 1
+exit 0

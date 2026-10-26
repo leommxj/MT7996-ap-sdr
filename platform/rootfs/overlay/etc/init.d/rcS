@@ -1,22 +1,29 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# Unit startup. The root is a read-only SquashFS under a RAM overlay; nothing
-# here writes NAND or the loader environment.
+# Unit startup. Bootstrap has already mounted the root overlay; this script
+# mounts RAM filesystems, brings up the management link, and reports health.
 grep -q ' /proc proc ' /proc/mounts || mount -t proc proc /proc
 grep -q ' /sys sysfs ' /proc/mounts || mount -t sysfs sysfs /sys
 grep -q ' /dev devtmpfs ' /proc/mounts || mount -t devtmpfs devtmpfs /dev
 # Only warnings and worse on the console, so link and driver notices do not
 # interleave with shell output there; dmesg keeps everything.
 echo 5 > /proc/sys/kernel/printk
-mkdir -p /run /tmp /var/tmp /work /durable /dev/pts
 . /etc/w1700k/storage.conf
+if [ -L /var/log ]; then rm -f /var/log; fi
+mkdir -p /run /tmp /var/tmp /work /var/log /dev/pts
 mount -t tmpfs -o size="$RUN_SIZE",mode=0755 tmpfs /run
 mount -t tmpfs -o size="$TMP_SIZE",mode=1777 tmpfs /tmp
 mount -t tmpfs -o size="$VAR_TMP_SIZE",mode=1777 tmpfs /var/tmp
 mount -t tmpfs -o size="$WORK_SIZE",mode=0755 tmpfs /work
+mount -t tmpfs -o size="$LOG_SIZE",mode=0755 tmpfs /var/log
 mount -t devpts devpts /dev/pts
 hostname w1700k-sdr
 ip link set lo up
+
+if grep -q " $DATA_MOUNT ubifs " /proc/mounts; then
+	mkdir -p "$DATA_MOUNT/logs" "$DATA_MOUNT/recordings" "$DATA_MOUNT/spectrumd" \
+		"$OVERLAY_UPPER" "$OVERLAY_WORK"
+fi
 
 # Problems are reported and boot continues, so the unit stays reachable.
 status=W1700K_BOOT_READY
@@ -27,4 +34,9 @@ insmod /lib/modules/w1700k_sdr.ko || {
 	status=W1700K_BOOT_DEGRADED
 }
 /etc/init.d/S50dropbear start || status=W1700K_BOOT_DEGRADED
+# spectrumd is optional in this image; start it when the package installed it.
+if [ -x /etc/init.d/S90spectrumd ]; then
+	/etc/init.d/S90spectrumd start || status=W1700K_BOOT_DEGRADED
+fi
+/usr/sbin/bootgood || status=W1700K_BOOT_DEGRADED
 echo "$status"

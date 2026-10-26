@@ -7,6 +7,12 @@ BR2_STATIC_LIBS=y
 BR2_INIT_BUSYBOX=y
 BR2_TARGET_GENERIC_HOSTNAME="w1700k-sdr"
 BR2_TARGET_GENERIC_ISSUE="W1700K SDR"
+# Development default: password login is enabled so a fresh unit can be reached
+# without a pre-generated key. A provisioned unit may still carry authorized
+# keys; keys added at runtime persist in the /data overlay.
+BR2_TARGET_ENABLE_ROOT_LOGIN=y
+BR2_TARGET_GENERIC_PASSWD_SHA512=y
+BR2_TARGET_GENERIC_ROOT_PASSWD="123456"
 # The overlay supplies inittab and rcS, and the bootstrap initramfs assembles
 # the RAM overlay over the read-only root.
 # BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
@@ -18,6 +24,8 @@ BR2_PACKAGE_BUSYBOX=y
 BR2_PACKAGE_LIBUBOOTENV=y
 BR2_PACKAGE_ETHTOOL=y
 BR2_PACKAGE_PCIUTILS=y
+# Temporary/on-image TCP/UDP throughput testing; static musl binary.
+BR2_PACKAGE_IPERF3=y
 # One deterministic read-only image; platform/bootstrap builds the small
 # initramfs that mounts it.
 # BR2_TARGET_ROOTFS_CPIO is not set
@@ -33,7 +41,7 @@ BR2_PACKAGE_DROPBEAR=y
 BR2_PACKAGE_DROPBEAR_DISABLE_REVERSEDNS=y
 BR2_PACKAGE_DROPBEAR_SMALL=y
 BR2_PACKAGE_GESFTPSERVER=y
-# Root login is key-only; init/provision adds the keys per unit.
+# Root login accepts a password or, when init/provision adds one, a key.
 # BR2_PACKAGE_HOSTAPD is not set
 # BR2_PACKAGE_WPA_SUPPLICANT is not set
 # BR2_PACKAGE_DNSMASQ is not set

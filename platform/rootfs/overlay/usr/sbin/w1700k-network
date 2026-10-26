@@ -1,19 +1,34 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# Bring up the management and IQ export ports from /etc/w1700k/network.conf.
+# WAN1/eth1 is a static direct link. lan3/lan4/eth2 are DHCP clients for the
+# management LAN; each gets its own lease and no bridge is assumed.
 set -u
 . /etc/w1700k/network.conf
 failed=0
 fail() { echo "w1700k-network: $*" >&2; failed=1; }
 
-ip link set "$MGMT_IF" up || fail "cannot bring up $MGMT_IF"
-ip address replace "$MGMT_ADDRESS" dev "$MGMT_IF" || fail "cannot address $MGMT_IF"
-
-# The export pump sends 8 KiB slices in single datagrams, so the MTU must be set
-# before the link carries traffic.
+# Direct laptop/export port: keep a fixed address and the configured MTU.
 ip link set "$EXPORT_IF" mtu "$EXPORT_MTU" || fail "cannot set the $EXPORT_IF MTU"
 ip link set "$EXPORT_IF" up || fail "cannot bring up $EXPORT_IF"
 ip address replace "$EXPORT_ADDRESS" dev "$EXPORT_IF" || fail "cannot address $EXPORT_IF"
+
+udhcpc_run()
+{
+	if command -v udhcpc >/dev/null 2>&1; then
+		udhcpc "$@"
+	else
+		/bin/busybox udhcpc "$@"
+	fi
+}
+
+for iface in ${DHCP_IFS:-}; do
+	ip link set "$iface" up || fail "cannot bring up $iface"
+	# -b: stay in the background until a lease arrives; the lease script
+	# configures the address/route/DNS and bootgood waits for it.
+	udhcpc_run -i "$iface" -b -p "/run/udhcpc.$iface.pid" \
+		-s /etc/udhcpc/default.script >/dev/null 2>&1 ||
+		fail "cannot start DHCP on $iface"
+done
 
 # All airoha_eth QDMA interrupts on CPU0, away from the CPUs the stream reader
 # and the export thread are pinned to.
