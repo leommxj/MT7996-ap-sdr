@@ -190,11 +190,13 @@ PROMPTS = {
     'dumper': re.compile(rb'(?:^|\n)dumper>[ \t]*$'),
     'restorer': re.compile(rb'(?:^|\n)restore>[ \t]*$'),
     'loader': re.compile(rb'(?:^|\n)SDR loader>[ \t]*$'),
+    # The bootmenu can leave the prompt on the same line as its last cell.
+    'chainloader': re.compile(rb'XR1710G chainloader>[ \t]*$'),
     # BusyBox ash prints the working directory, `~` for root's home. Only these
     # two exact root-shell prompts count, not any `#` that boot output may end in.
     'linux': re.compile(rb'(?:^|\n)(?:/|~) #[ \t]*$'),
 }
-SETTLED = re.compile(r'(?:ECNT>|=>|dumper>|restore>|SDR loader>|(?:/|~) #)[ \t]*$')
+SETTLED = re.compile(r'(?:ECNT>|=>|dumper>|restore>|SDR loader>|XR1710G chainloader>|(?:/|~) #)[ \t]*$')
 # How long the port must be silent at a prompt before a command counts as
 # finished: over a thousand byte-times at 115200 baud.
 QUIET_SETTLE = 0.1
@@ -230,7 +232,12 @@ class ConsoleSession:
         self.max_rx = max_rx
         self.uart = None
         self.control = None
-        self.fifo = self.dir / 'tx.fifo'
+        override = os.environ.get('W1700K_FIFO_DIR')
+        fifo_dir = Path(override) if override else self.dir
+        # The run directory's own FIFO is RUN/tx.fifo. When a local filesystem
+        # is substituted for a shared one, keep the run name in the filename.
+        self.fifo = (fifo_dir / f'{self.dir.name}-tx.fifo' if override
+                     else self.dir / 'tx.fifo')
         self.raw = None
         self.catcher = None
         self.buffer = bytearray()

@@ -14,8 +14,9 @@ work beyond its first-stage U-Boot.
 - An Ethernet cable from a host NIC to the unit's `lan3` port.
 - A Linux host with Python 3.10+, pyserial and OpenSSH (`ssh-keygen`), and the
   build outputs from `make` in the repository root.
-- An SSH key pair; its public half is installed for root logins
+- An optional SSH key pair; its public half is installed for root logins
   (default `~/.ssh/id_ed25519.pub`, `id_ecdsa.pub` or `id_rsa.pub`).
+  Without one, the image still boots with the default root password `123456`.
 
 ## Host setup, once
 
@@ -56,8 +57,8 @@ It stops stock U-Boot at power-on and then:
    `calibration` partition in the backup) as `eeprom.bin` beside the backup,
    where the host tools find it; `init/eeprom --unit SERIAL` does the same for
    an existing backup;
-3. builds the unit's root filesystem with your SSH key and a host key made for
-   this unit, and writes `known_hosts` for it beside the backup;
+3. builds the unit's root filesystem with an optional SSH key and a host key made
+   for this unit, and writes `known_hosts` for it beside the backup;
 4. writes our U-Boot into the `loader` partition through stock U-Boot, reads it
    back and boots that copy;
 5. from our U-Boot, erases `system` and `durable`, creates their UBI volumes,
@@ -66,7 +67,10 @@ It stops stock U-Boot at power-on and then:
    partition (the old one is kept as `bootcmd_orig`);
 7. boots the installed system and checks it.
 
-The unit is then reachable with `ssh root@192.168.1.1`. A full run takes about
+The unit is then reachable with `ssh root@192.168.1.1`; use the configured
+public key or the default password `123456`. Change the password or add a key
+before exposing the unit to an untrusted network. Keys added at runtime persist
+in `/data/overlay/upper/root/.ssh/authorized_keys`. A full run takes about
 five minutes. Every step is checked before the next one starts; if a run is
 interrupted, run it again: the backup is kept and is never overwritten.
 `--expect-serial SERIAL` stops before anything is written unless the unit is

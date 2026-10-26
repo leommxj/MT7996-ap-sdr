@@ -17,12 +17,14 @@ import partitions  # noqa: E402  the NAND layout shared with the platform build
 
 IMAGES = ROOT / 'platform/build/images'
 LOADER = IMAGES / 'w1700k-loader.itb'
+CHAINLOADER = IMAGES / 'w1700k-chainloader.itb'
 DUMPER = IMAGES / 'w1700k-dumper.itb'
 SYSTEM_FIT = IMAGES / 'w1700k-system.itb'
 RECOVERY_FIT = IMAGES / 'w1700k-recovery.itb'
 ROOTFS = IMAGES / 'rootfs.squashfs'
 # One empty durable UBIFS per NAND part (platform/partitions.py NANDS).
 DURABLES = tuple(IMAGES / nand.durable_image for nand in partitions.NANDS)
+DATA_IMAGES = tuple(IMAGES / f'data-{nand.name.lower()}.ubifs' for nand in partitions.NANDS)
 # unsquashfs and mksquashfs, built by Buildroot, make the per-unit root.
 SQUASHFS_TOOLS = ROOT / 'platform/build/buildroot/host/bin'
 

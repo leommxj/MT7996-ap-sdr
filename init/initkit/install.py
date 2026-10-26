@@ -18,6 +18,8 @@
 Steps 4 to 7 replace the stock firmware; the backup from step 2 is the only copy
 of it. Interrupted at any point, the installation can be run again.
 """
+import os
+
 from . import backup, config, layout, nand as parts, provision, stock, steps
 from . import console as unit
 from .console import StepFailed
@@ -56,7 +58,8 @@ def run(settings, expect_serial=None, authorized_key=None, import_host_key=None,
     else:
         config.require_images(config.LOADER, config.DUMPER, config.SYSTEM_FIT,
                               config.ROOTFS, *config.DURABLES)
-        provision.authorized_key(authorized_key)   # fail before touching the unit
+        if authorized_key is not None:
+            provision.authorized_key(authorized_key)   # fail before touching the unit
     with open_session(settings, 'install', write=not backup_only) as session:
         console, log = session.console, session.log
         # Stock's own boot is seen, for the vendor pool it reports.
@@ -93,8 +96,16 @@ def run(settings, expect_serial=None, authorized_key=None, import_host_key=None,
             print(f'install: backup {existing}; stopping as asked (--backup-only)')
             return 0
 
-        rootfs, host_key = provision.provision(directory, authorized_key, import_host_key,
-                                             address=settings.device_ip)
+        prebuilt = directory / provision.IMAGE
+        known_hosts = directory / provision.KNOWN_HOSTS
+        if os.environ.get('W1700K_PREBUILT_ROOTFS') == '1':
+            if not prebuilt.is_file() or not known_hosts.is_file():
+                raise StepFailed(f'prebuilt rootfs or known_hosts missing in {directory}')
+            rootfs = prebuilt
+            host_key = known_hosts.read_text().strip().split(' ', 1)[1]
+        else:
+            rootfs, host_key = provision.provision(directory, authorized_key, import_host_key,
+                                                 address=settings.device_ip)
 
         print('install: writing our loader')
         unit.to_stock(console, log, 'dumper')

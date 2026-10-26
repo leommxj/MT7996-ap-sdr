@@ -4,7 +4,8 @@
 The unit is always in one of these states, named by the prompt it shows:
 
     stock    vendor U-Boot (`ECNT>`), the first stage; stopped by the boot catcher
-    loader   our U-Boot (`SDR loader>`), loaded by stock from NAND or over TFTP
+    loader   the old SDR U-Boot (`SDR loader>`), kept for the pre-v2 layout
+    chainloader  the v2 U-Boot (`XR1710G chainloader>`)
     dumper   the write-free dumper (`dumper>`), loaded by stock over TFTP
     restorer the restorer (`restore>`), loaded by stock over TFTP
     linux    our Linux root shell
@@ -15,7 +16,7 @@ stock's countdown, which the catcher stops.
 import re
 import secrets
 
-STATES = ('stock', 'loader', 'dumper', 'restorer', 'linux')
+STATES = ('stock', 'loader', 'chainloader', 'dumper', 'restorer', 'linux')
 COUNTDOWN = re.compile(r'(?i)key to (?:stop|abort|interrupt)')
 # U-Boot and shell output that means the command did not do what was asked,
 # even when the shell reports success.
@@ -106,7 +107,7 @@ def to_stock(console, log, state, fresh=False):
 
 
 def to_installed_loader(console, log, state):
-    """Reach the prompt of the loader installed in NAND (via stock's bootcmd)."""
+    """Reach the prompt of the old loader installed in NAND (via stock's bootcmd)."""
     if state == 'loader':
         return
     to_stock(console, log, state)
@@ -114,6 +115,17 @@ def to_installed_loader(console, log, state):
     console.interrupt_autoboot('loader', limit=60)
     console.expect_prompt('loader', timeout=10)
     log.event('transition', frm='stock', to='loader')
+
+
+def to_chainloader(console, log, state):
+    """Reach the v2 chainloader prompt via stock's saved bootcmd."""
+    if state == 'chainloader':
+        return
+    to_stock(console, log, state)
+    console.send_async('run bootcmd')
+    console.interrupt_autoboot('chainloader', limit=90)
+    console.expect_prompt('chainloader', timeout=15)
+    log.event('transition', frm='stock', to='chainloader')
 
 
 def boot_linux(console, log, command_line='run bootcmd', limit=420):

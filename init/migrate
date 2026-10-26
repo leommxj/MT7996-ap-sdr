@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Migrate an installed unit to the v2 chainloader + 439 MiB UBI layout."""
+import argparse
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from initkit import config, session, migrate            # noqa: E402
+from initkit.console import StepFailed                  # noqa: E402
+
+
+def main():
+    settings = config.load()
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    config.add_arguments(parser, settings)
+    parser.add_argument('--expect-serial', metavar='SERIAL')
+    parser.add_argument('--force', action='store_true',
+                        help='migrate even if stock already boots a v2 chainloader')
+    args = parser.parse_args()
+    try:
+        return migrate.run(session.settings_from(args), args.expect_serial, args.force)
+    except (StepFailed, RuntimeError) as error:
+        sys.exit(f'migrate: {error}')
+    except KeyboardInterrupt:
+        sys.exit('migrate: interrupted')
+
+
+if __name__ == '__main__':
+    sys.exit(main())

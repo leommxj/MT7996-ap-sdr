@@ -2,6 +2,7 @@
 """Installation and updates, run end to end against a simulated unit."""
 import argparse
 import contextlib
+import os
 from pathlib import Path
 import re
 import shutil
@@ -425,6 +426,25 @@ class Keys(unittest.TestCase):
         public = provision.host_public_key(key)
         self.assertTrue(public.startswith(b'ssh-ed25519 '))
         self.assertTrue(provision.fingerprint(public.decode()).startswith('SHA256:'))
+
+    def test_a_missing_key_is_allowed_when_not_required(self):
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.dict(os.environ, {'HOME': home}):
+            self.assertIsNone(provision.authorized_key(required=False))
+
+    def test_a_missing_explicit_key_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / 'missing.pub'
+            with self.assertRaisesRegex(provision.ProvisionError, 'does not exist'):
+                provision.authorized_key(missing, required=False)
+
+    def test_private_files_without_a_key_has_no_authorized_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unit = Path(directory) / 'W1700KTEST0001'
+            unit.mkdir()
+            files = provision.private_files(unit, None, provision.generate_host_key())
+            self.assertNotIn('root/.ssh/authorized_keys', files)
+            self.assertIn('etc/w1700k/unit', files)
 
     def test_a_non_key_is_refused(self):
         with tempfile.NamedTemporaryFile('w', suffix='.pub') as stream:

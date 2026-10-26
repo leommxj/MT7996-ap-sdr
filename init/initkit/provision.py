@@ -123,28 +123,41 @@ def host_key(unit_directory, import_from=None):
     return path.read_bytes()
 
 
-def authorized_key(path=None):
-    """The public key for root logins: the one given, or the user's default."""
-    candidates = [Path(path).expanduser()] if path else \
-        [Path('~/.ssh').expanduser() / name
-         for name in ('id_ed25519.pub', 'id_ecdsa.pub', 'id_rsa.pub')]
+def authorized_key(path=None, required=True):
+    """The public key for root logins: the one given, or the user's default.
+
+    With required=False, an image may be built without a key; password login
+    remains available. An explicitly named missing or malformed key is always
+    an error.
+    """
+    if path:
+        candidates = [Path(path).expanduser()]
+    else:
+        candidates = [Path('~/.ssh').expanduser() / name
+                      for name in ('id_ed25519.pub', 'id_ecdsa.pub', 'id_rsa.pub')]
     for candidate in candidates:
         if candidate.is_file():
             line = candidate.read_bytes().strip()
             if not line.split(b' ', 1)[0] in KEY_TYPES:
                 raise ProvisionError(f'{candidate} is not an SSH public key')
             return line + b'\n'
-    raise ProvisionError('no SSH public key for root logins; pass --authorized-key '
-                         'or create ~/.ssh/id_ed25519.pub')
+    if path:
+        raise ProvisionError(f'{path} does not exist or is not a file')
+    if required:
+        raise ProvisionError('no SSH public key for root logins; pass --authorized-key '
+                             'or create ~/.ssh/id_ed25519.pub')
+    return None
 
 
 def private_files(unit_directory, public_key, dropbear_key):
     """{path in the root: (bytes, mode)} for one unit."""
     files = {
-        'root/.ssh/authorized_keys': (public_key, 0o600),
         f'etc/dropbear/{HOST_KEY}': (dropbear_key, 0o600),
         f'etc/dropbear/{HOST_KEY}.pub': (host_public_key(dropbear_key) + b'\n', 0o644),
+        'etc/w1700k/unit': (Path(unit_directory).name.encode() + b'\n', 0o644),
     }
+    if public_key:
+        files['root/.ssh/authorized_keys'] = (public_key, 0o600)
     network = Path(unit_directory) / NETWORK
     if network.is_file():
         files['etc/w1700k/network.conf'] = (network.read_bytes(), 0o644)
@@ -179,7 +192,9 @@ def build(unit_directory, public_key, dropbear_key, generic=config.ROOTFS,
             raise ProvisionError(f'{path} is missing; run `make`')
     unit_directory = Path(unit_directory)
     output = unit_directory / IMAGE
-    with tempfile.TemporaryDirectory(prefix='w1700k-root-', dir=unit_directory) as temporary:
+    build_tmp = os.environ.get('W1700K_BUILD_TMP')
+    temp_kwargs = {'dir': build_tmp} if build_tmp else {'dir': unit_directory}
+    with tempfile.TemporaryDirectory(prefix='w1700k-root-', **temp_kwargs) as temporary:
         tree = Path(temporary) / 'root'
         subprocess.run([str(unsquashfs), '-no-xattrs', '-quiet', '-no-progress', '-d',
                         str(tree), str(generic)], check=True, stdout=subprocess.DEVNULL)
@@ -201,10 +216,15 @@ def build(unit_directory, public_key, dropbear_key, generic=config.ROOTFS,
                        env=env, check=True, stdout=subprocess.DEVNULL)
         if partial.read_bytes()[:4] != b'hsqs':
             raise ProvisionError('mksquashfs did not produce a SquashFS image')
-        if partial.stat().st_size > config.partitions.ROOTFS_VOLUME_BYTES:
-            raise ProvisionError('the unit root does not fit its volume')
+        # The root is embedded in the FIT; platform/images.py checks the FIT
+        # against the 24 MiB staging window and the 32 MiB volume.
         partial.chmod(0o600)
-        partial.replace(output)
+        try:
+            partial.replace(output)
+        except OSError:
+            shutil.copyfile(partial, output)
+            output.chmod(0o600)
+            partial.unlink()
     return output
 
 
@@ -214,7 +234,7 @@ def provision(unit_directory, authorized_key_path=None, import_host_key=None, ad
     unit_directory = Path(unit_directory)
     unit_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     dropbear_key = host_key(unit_directory, import_host_key)
-    image = build(unit_directory, authorized_key(authorized_key_path), dropbear_key)
+    image = build(unit_directory, authorized_key(authorized_key_path, required=False), dropbear_key)
     public = host_public_key(dropbear_key).decode()
     (unit_directory / KNOWN_HOSTS).write_text(f'{address} {public}\n')
     return image, public
