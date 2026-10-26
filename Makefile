@@ -12,7 +12,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: all toolchain linux sdr rootfs loader dumper restorer images firmware host check \
+.PHONY: all toolchain linux sdr rootfs loader chainloader dumper restorer images firmware host check \
 	clean distclean
 
 all: images dumper restorer firmware host
@@ -37,8 +37,12 @@ rootfs: sdr
 loader: toolchain
 	$(PYTHON) platform/loader/build.py
 
+# The installed second stage: raw MTD + standard UBI, 1 MiB slot.
+chainloader: toolchain
+	$(PYTHON) platform/chainloader/build.py
+
 # The system and recovery FITs, the root and the durable images (one per NAND part).
-images: rootfs loader
+images: rootfs chainloader
 	$(PYTHON) platform/images.py
 
 # The write-free NAND dumper used for the backup before installation.
@@ -66,6 +70,7 @@ check:
 # Remove build outputs but keep downloads and prepared sources.
 clean:
 	rm -rf platform/build/buildroot platform/build/linux platform/build/loader \
+		platform/build/chainloader \
 		platform/build/dumper platform/build/restorer platform/build/mkimage \
 		platform/build/bootstrap platform/build/images platform/build/rootfs-overlay \
 		platform/build/logs \

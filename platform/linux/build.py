@@ -185,7 +185,7 @@ def device_tree(openwrt):
 
 
 def main():
-    partitions.check('platform/linux/dts/an7581-w1700k-sdr.dts', 'linux')
+    partitions.v2_check('platform/linux/dts/an7581-w1700k-sdr.dts', 'linux-v2')
     require(Path(CROSS_COMPILE + 'gcc').is_file(),
             'no cross compiler; run platform/rootfs/build.py toolchain first')
     openwrt = prepare_source()

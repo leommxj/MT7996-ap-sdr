@@ -76,7 +76,7 @@ class CompiledBoard(unittest.TestCase):
     def test_a_moved_partition_is_caught(self):
         tree = copy.deepcopy(self.tree)
         for props in tree.values():
-            if props.get('label') == b'system\0':
+            if props.get('label') == b'ubi\0':
                 props['reg'] = struct.pack('>II', 0x700000, 0x3100000)
         with self.assertRaisesRegex(Exception, 'partitions'):
             self.board(tree)
@@ -94,8 +94,8 @@ class LinkedKernel(unittest.TestCase):
         board_check.linked(system_map)
         with self.assertRaisesRegex(Exception, 'mtk_bmt_attach'):
             board_check.linked(system_map + '\nffff0000 T mtk_bmt_attach')
-        with self.assertRaisesRegex(Exception, 'sdr_bmt_attach'):
-            board_check.linked(system_map.replace('sdr_bmt_attach', 'other'))
+        with self.assertRaisesRegex(Exception, 'ubi_attach_mtd_dev'):
+            board_check.linked(system_map.replace('ubi_attach_mtd_dev', 'other'))
         with self.assertRaisesRegex(Exception, 'rtl8261c'):
             board_check.linked(system_map.replace('_fw_rtl_nic_rtl8261c_bin_bin', 'other'))
 

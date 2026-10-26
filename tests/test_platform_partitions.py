@@ -83,6 +83,55 @@ class Layout(unittest.TestCase):
                       partitions.policy_header('uenv'))
 
 
+class V2Layout(unittest.TestCase):
+    def test_the_raw_table_covers_the_chip(self):
+        partitions.v2_check_table()
+        self.assertEqual(partitions.V2_GEOMETRY['vendor'], (0x0, 0x600000))
+        self.assertEqual(partitions.V2_GEOMETRY['chainloader'], (0x600000, 0x100000))
+        self.assertEqual(partitions.V2_GEOMETRY['ubi'], (0x700000, 0x1b700000))
+        self.assertEqual(partitions.V2_GEOMETRY['reserved_bmt'], (0x1be00000, 0x4200000))
+        self.assertEqual(partitions.V2_UBI_END, partitions.V2_RESERVED_OFFSET)
+
+    def test_volume_tables_match_the_plan(self):
+        kv, lv = partitions.NANDS
+        self.assertEqual(partitions.v2_ubi_lebs(kv), 3428)
+        self.assertEqual(partitions.v2_ubi_lebs(lv), 1712)
+        self.assertEqual(partitions.v2_data_lebs(kv), 2730)
+        self.assertEqual(partitions.v2_data_lebs(lv), 1361)
+        for nand in partitions.NANDS:
+            volumes = partitions.v2_volumes(nand)
+            self.assertEqual([name for name, _, _ in volumes],
+                             ['ubootenv', 'ubootenv2', 'fit_a', 'fit_b', 'recovery', 'data'])
+            self.assertEqual(sum(lebs for _, _, lebs in volumes),
+                             partitions.v2_ubi_lebs(nand))
+            self.assertGreaterEqual(volumes[2][2] * nand.leb, partitions.V2_FIT_BYTES)
+            self.assertGreaterEqual(volumes[3][2] * nand.leb, partitions.V2_FIT_BYTES)
+            self.assertGreaterEqual(volumes[4][2] * nand.leb, partitions.V2_RECOVERY_BYTES)
+
+    def test_chainloader_and_linux_share_the_same_raw_regions(self):
+        self.assertEqual(partitions.v2_fragment('chainloader'),
+                         partitions.v2_fragment('linux-v2'))
+        text = partitions.v2_fragment('linux-v2')
+        for name in ('vendor', 'chainloader', 'ubi', 'reserved_bmt'):
+            self.assertEqual(text.count(f'label = "{name}";'), 1, name)
+        self.assertIn('\t\t\tread-only;', text)
+        self.assertEqual(partitions.V2_READ_ONLY['linux-v2'],
+                         {'vendor', 'chainloader', 'reserved_bmt'})
+
+    def test_both_v2_device_trees_are_current(self):
+        for path, stage in partitions.V2_DEVICE_TREES.items():
+            with self.subTest(path=path):
+                partitions.v2_check(path, stage)
+
+    def test_a_stale_v2_region_is_reported(self):
+        path, stage = next(iter(partitions.V2_DEVICE_TREES.items()))
+        text = (ROOT / path).read_text().replace('0x00700000 0x1b700000',
+                                                 '0x00700000 0x1b600000', 1)
+        with mock.patch.object(Path, 'read_text', return_value=text), \
+                self.assertRaisesRegex(ValueError, 'stale v2 partition table'):
+            partitions.v2_check(path, stage)
+
+
 class DeviceTrees(unittest.TestCase):
     def test_both_device_trees_carry_the_current_region(self):
         for path, stage in partitions.DEVICE_TREES.items():

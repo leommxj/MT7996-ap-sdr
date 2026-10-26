@@ -6,19 +6,18 @@
 
 Outputs in platform/build/images/:
 
-  w1700k-system.itb    installed in UBI volume `fit`: kernel, DTB and a small
-                       bootstrap initramfs that mounts `rootfs` (a SquashFS on
-                       ubiblock0_3) under a RAM overlay
-  rootfs.squashfs      installed in UBI volume `rootfs` (after init/provision
-                       adds the unit's keys)
-  w1700k-recovery.itb  the same kernel and DTB with the root inside the
-                       initramfs, booted from RAM by the loader for recovery
-  durable-<part>.ubifs an empty UBIFS for the `durable` partition, one per
-                       NAND part (its LEB and page sizes are in the image)
+  w1700k-system.itb    one FIT for `fit_a`/`fit_b`: kernel, DTB, bootstrap
+                       initramfs and the unit's rootfs.squashfs; `conf-sdr`
+                       carries sdr,unit/rootfs-sha256/rootfs-size
+  rootfs.squashfs      the unit root embedded in the FIT (kept for provisioning)
+  w1700k-recovery.itb  the same kernel/DTB/root, booted from `recovery` in RAM
+  data-<part>.ubifs    initial UBIFS for the `data` volume: overlay upper/work,
+                       logs, recordings, spectrumd
 
 The FITs are parsed only by our loader, so their hashes are SHA-256.
 """
 import gzip
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -53,7 +52,7 @@ INITRD_LOAD = 0x85000000
 INITRD_END = 0x87000000
 FIT_END = FDT_LOAD
 # A fixed UBIFS identity, so the durable image is reproducible.
-DURABLE_UUID = uuid.UUID('d87d243d-7e3c-5e3a-9527-2aa6bc7daf31')
+DATA_UUID = uuid.UUID('d87d243d-7e3c-5e3a-9527-2aa6bc7daf31')
 
 
 # --------------------------------------------------------------------------
@@ -72,7 +71,7 @@ def newc(name, mode, data=b'', inode=1, rdev=(0, 0)):
 def bootstrap(root=None):
     """busybox, /init and the mount points; with `root`, the SquashFS too."""
     entries = [(name, stat.S_IFDIR | 0o755, b'', (0, 0))
-               for name in ('bin', 'dev', 'lower', 'newroot', 'proc', 'ram', 'sbin', 'sys')]
+               for name in ('bin', 'data', 'dev', 'lower', 'newroot', 'proc', 'ram', 'sbin', 'sys')]
     entries += [
         ('init', stat.S_IFREG | 0o755, (PLATFORM / 'bootstrap/init').read_bytes(), (0, 0)),
         ('bin/busybox', stat.S_IFREG | 0o755, BUSYBOX.read_bytes(), (0, 0)),
@@ -94,7 +93,7 @@ def bootstrap(root=None):
 # FITs
 # --------------------------------------------------------------------------
 
-def linux_fit(description, kernel, dtb, initrd):
+def linux_fit(description, kernel, dtb, initrd, unit, rootfs):
     def image(name, path, kind, load, extra=''):
         return f'''        {name} {{
             description = "{description} {name}";
@@ -104,6 +103,7 @@ def linux_fit(description, kernel, dtb, initrd):
             hash-1 {{ algo = "sha256"; }};
         }};
 '''
+    digest = hashlib.sha256(rootfs).hexdigest()
     return ('/dts-v1/;\n/ {\n'
             f'    description = "{description}";\n    #address-cells = <1>;\n'
             '    images {\n'
@@ -112,8 +112,12 @@ def linux_fit(description, kernel, dtb, initrd):
             + image('fdt', dtb, 'flat_dt', FDT_LOAD)
             + image('ramdisk', initrd, 'ramdisk', INITRD_LOAD, ' os = "linux";')
             + '    };\n    configurations {\n        default = "conf-sdr";\n'
-            '        conf-sdr { kernel = "kernel"; fdt = "fdt"; ramdisk = "ramdisk"; };\n'
-            '    };\n};\n')
+            '        conf-sdr {\n'
+            '            kernel = "kernel"; fdt = "fdt"; ramdisk = "ramdisk";\n'
+            f'            sdr,unit = "{unit}";\n'
+            f'            sdr,rootfs-sha256 = "{digest}";\n'
+            f'            sdr,rootfs-size = <{len(rootfs)}>;\n'
+            '        };\n    };\n};\n')
 
 
 def check_layout(fit, kernel, initrd_bytes):
@@ -130,26 +134,34 @@ def check_layout(fit, kernel, initrd_bytes):
             f'the {fit.name} initrd ({initrd_bytes} bytes) overruns its load window')
 
 
-def check_fit(path, payloads):
-    """Each image carries exactly the bytes it was built from."""
+def check_fit(path, payloads, unit, rootfs):
+    """Each image carries exactly the bytes it was built from, and the SDR
+    configuration attests this unit and root."""
     tree = fdt.nodes(path.read_bytes())
     for name, data in payloads.items():
         require(tree[f'/images/{name}']['data'] == data,
                 f'{path.name}: the {name} image differs from its input')
         require(fdt.string(tree[f'/images/{name}/hash-1']['algo']) == 'sha256',
                 f'{path.name}: the {name} image is not SHA-256 hashed')
+    conf = tree['/configurations/conf-sdr']
+    require(fdt.string(conf['sdr,unit']) == unit,
+            f'{path.name}: sdr,unit is not {unit}')
+    require(fdt.string(conf['sdr,rootfs-sha256']) == hashlib.sha256(rootfs).hexdigest(),
+            f'{path.name}: sdr,rootfs-sha256 differs from the root')
+    require(fdt.cells(conf['sdr,rootfs-size']) == [len(rootfs)],
+            f'{path.name}: sdr,rootfs-size differs from the root')
 
 
-def build_fit(path, description, initrd):
-    uboot.make_fit(linux_fit(description, KERNEL_IMAGE, DTB, initrd), path,
+def build_fit(path, description, initrd, unit, rootfs):
+    uboot.make_fit(linux_fit(description, KERNEL_IMAGE, DTB, initrd, unit, rootfs), path,
                    LINUX_OUT / 'scripts/dtc', LOG)
     check_fit(path, {'kernel': KERNEL_IMAGE.read_bytes(), 'fdt': DTB.read_bytes(),
-                     'ramdisk': initrd.read_bytes()})
+                     'ramdisk': initrd.read_bytes()}, unit, rootfs)
     check_layout(path, KERNEL_IMAGE.read_bytes(), initrd.stat().st_size)
 
 
 # --------------------------------------------------------------------------
-# The durable UBIFS
+# The data UBIFS
 # --------------------------------------------------------------------------
 
 def _node_crc(node):
@@ -157,15 +169,11 @@ def _node_crc(node):
 
 
 def normalize_ubifs(data):
-    """Fix the UBIFS UUID and zero every inode timestamp, rewriting node CRCs.
-
-    mkfs.ubifs stamps a random UUID and copies the source directory's ctime into
-    the root inode; neither can be chosen from the command line.
-    """
+    """Fix the UBIFS UUID and zero every inode timestamp, rewriting node CRCs."""
     image = bytearray(data)
     magic = struct.pack('<I', 0x06101831)
-    require(image[:4] == magic, 'durable: not a UBIFS image')
-    image[108:124] = DURABLE_UUID.bytes
+    require(image[:4] == magic, 'data: not a UBIFS image')
+    image[108:124] = DATA_UUID.bytes
     struct.pack_into('<I', image, 4, _node_crc(image[:struct.unpack_from('<I', image, 16)[0]]))
     cursor, inodes = 4, 0
     while (offset := image.find(magic, cursor)) >= 0:
@@ -177,51 +185,57 @@ def normalize_ubifs(data):
             continue      # not an inode node
         node = image[offset:offset + length]
         require(struct.unpack_from('<I', node, 4)[0] == _node_crc(node),
-                'durable: an inode node has a bad CRC')
+                'data: an inode node has a bad CRC')
         image[offset + 56:offset + 92] = bytes(36)
         struct.pack_into('<I', image, offset + 4, _node_crc(image[offset:offset + length]))
         inodes += 1
-    require(inodes, 'durable: the image has no inode')
+    require(inodes, 'data: the image has no inode')
     return bytes(image)
 
 
-def durable_image(nand):
-    return IMAGES / nand.durable_image
+def data_image(nand):
+    return IMAGES / f'data-{nand.name.lower()}.ubifs'
 
 
-def durable(nand):
+def data(nand):
+    """An empty persistent data volume: overlay upper/work, logs, recordings."""
     mkfs = BUILDROOT_OUT / 'host/sbin/mkfs.ubifs'
     require(mkfs.is_file(), f'{mkfs} is missing; Buildroot builds it (BR2_PACKAGE_HOST_MTD)')
-    with tempfile.TemporaryDirectory(prefix='durable-', dir=BUILD) as temporary:
+    with tempfile.TemporaryDirectory(prefix='data-', dir=BUILD) as temporary:
         tree = Path(temporary) / 'tree'
-        tree.mkdir()
+        for name in ('overlay/upper', 'overlay/work', 'logs', 'recordings', 'spectrumd'):
+            (tree / name).mkdir(parents=True)
         os.utime(tree, (0, 0))
-        raw = Path(temporary) / 'durable.ubifs'
+        raw = Path(temporary) / 'data.ubifs'
         env = os.environ.copy()
         env.update(REPRODUCIBLE_ENV)
         run([mkfs, '-U', '-r', tree, '-m', hex(nand.page), '-e', hex(nand.leb),
-             '-c', str(partitions.durable_lebs(nand)), '-x', 'zstd', '-o', raw],
+             '-c', str(partitions.v2_data_lebs(nand)), '-x', 'zstd', '-o', raw],
             env=env, log=LOG)
-        write_if_changed(durable_image(nand), normalize_ubifs(raw.read_bytes()))
+        write_if_changed(data_image(nand), normalize_ubifs(raw.read_bytes()))
 
 
 def main():
     for path in (KERNEL_IMAGE, DTB, ROOTFS_IMAGE, BUSYBOX, MKIMAGE):
         require(path.is_file(), f'{path} is missing; build it first (see the top-level Makefile)')
     IMAGES.mkdir(parents=True, exist_ok=True)
-    root = ROOTFS_IMAGE.read_bytes()
-    require(len(root) <= partitions.ROOTFS_VOLUME_BYTES, 'the root does not fit its volume')
+    root_path = Path(os.environ.get('W1700K_ROOTFS', ROOTFS_IMAGE))
+    require(root_path.is_file(), f'{root_path} is missing')
+    root = root_path.read_bytes()
+    unit = os.environ.get('W1700K_UNIT', 'UNPROVISIONED')
     write_if_changed(ROOTFS, root)
-    write_if_changed(BOOTSTRAP, bootstrap())
+    write_if_changed(BOOTSTRAP, bootstrap(root))
     write_if_changed(RECOVERY_INITRD, bootstrap(root))
-    build_fit(SYSTEM_FIT, 'W1700K SDR system', BOOTSTRAP)
-    require(SYSTEM_FIT.stat().st_size <= partitions.FIT_VOLUME_BYTES,
-            'the system FIT does not fit its volume')
-    build_fit(RECOVERY_FIT, 'W1700K SDR recovery', RECOVERY_INITRD)
+    build_fit(SYSTEM_FIT, 'W1700K SDR system', BOOTSTRAP, unit, root)
+    require(SYSTEM_FIT.stat().st_size <= partitions.V2_FIT_BYTES,
+            f'the system FIT ({SYSTEM_FIT.stat().st_size} bytes) exceeds the 32 MiB slot')
+    build_fit(RECOVERY_FIT, 'W1700K SDR recovery', RECOVERY_INITRD, unit, root)
+    require(RECOVERY_FIT.stat().st_size <= partitions.V2_RECOVERY_BYTES,
+            f'the recovery FIT ({RECOVERY_FIT.stat().st_size} bytes) exceeds 20 MiB')
     for nand in partitions.NANDS:
-        durable(nand)
+        data(nand)
     for path in (SYSTEM_FIT, ROOTFS, RECOVERY_FIT,
-                 *(durable_image(nand) for nand in partitions.NANDS)):
+                 *(data_image(nand) for nand in partitions.NANDS)):
         print(f'images: {path} ({path.stat().st_size} bytes)')
     return 0
 

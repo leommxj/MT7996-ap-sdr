@@ -1,0 +1,28 @@
+bootslot=a
+upgrade_available=0
+bootlimit=0
+bootcount=0
+loadaddr=0x81800000
+initaddr=0x89000000
+ipaddr=192.168.1.1
+serverip=192.168.1.10
+bootconf=conf-sdr
+bootargs_system=console=ttyS0,115200 earlycon panic=5 ro rdinit=/init ubi.mtd=ubi sdr.mode=system
+bootargs_recovery=console=ttyS0,115200 earlycon panic=5 ro rdinit=/init sdr.mode=recovery
+bootcmd=if test "${upgrade_available}" = "1"; then if test "${bootcount}" -gt "${bootlimit}"; then run boot_alt; else run boot_${bootslot} || run boot_recovery; fi; else run boot_${bootslot} || run boot_recovery; fi
+boot_a=ubi part ubi && ubi read ${loadaddr} fit_a && setenv bootargs ${bootargs_system} sdr.slot=a && bootm ${loadaddr}#conf-sdr
+boot_b=ubi part ubi && ubi read ${loadaddr} fit_b && setenv bootargs ${bootargs_system} sdr.slot=b && bootm ${loadaddr}#conf-sdr
+boot_recovery=ubi part ubi && ubi check recovery && ubi read ${initaddr} recovery && setenv bootargs ${bootargs_recovery} && bootm ${initaddr}#conf-sdr
+boot_tftp=tftpboot ${initaddr} sdr-fit.itb && setenv bootargs ${bootargs_recovery} && bootm ${initaddr}#conf-sdr
+boot_alt=if test "${bootslot}" = "a"; then setenv bootslot b; else setenv bootslot a; fi; setenv upgrade_available 0; setenv bootlimit 0; setenv bootcount 0; saveenv; reset
+altbootcmd=run boot_alt
+bootdelay=5
+bootmenu_title=XR1710G SDR chainloader
+bootmenu_default=0
+bootmenu_delay=5
+bootmenu_0=Boot current slot=run bootcmd
+bootmenu_1=Boot slot A=run boot_a
+bootmenu_2=Boot slot B=run boot_b
+bootmenu_3=Boot recovery=run boot_recovery
+bootmenu_4=Boot via TFTP=run boot_tftp
+bootmenu_5=Reboot=reset

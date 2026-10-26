@@ -13,8 +13,6 @@ from buildlib import require
 import fdt
 import partitions
 
-BOOTARGS = ('console=ttyS0,115200 earlycon panic=5 ro rdinit=/init '
-            'ubi.mtd=system ubi.block=0,rootfs')
 ENABLED = ('pcie0', 'pcie2', 'eth', 'gdm1', 'gdm2', 'gdm4', 'pon_pcs', 'eth_pcs',
            'switch', 'gsw_port1', 'gsw_port2', 'i2c0', 'snfi')
 DISABLED = ('pcie1', 'npu', 'uart2', 'hsuart3', 'usb0', 'usb1', 'mmc0')
@@ -28,8 +26,7 @@ RESERVED = {'atf': (0x80000000, 0x200000), 'npu_binary': (0x84000000, 0xa00000),
 # that some W1700K2s carry instead of the W25N04KV.
 LINKED = ('airoha_probe', 'mtk_pcie_probe', 'an7581_phy_probe', 'airoha_snand_probe',
           'spinand_probe', 'ubi_attach_mtd_dev', 'ubifs_read_superblock',
-          'sdr_bmt_attach', 'airoha_bmt_translate', 'airoha_bmt_transaction_recover',
-          'airoha_bmt_publish', 'rtl826x_probe', 'rtl8261x_probe', 'rtl8261x_config_init',
+          'rtl826x_probe', 'rtl8261x_probe', 'rtl8261x_config_init',
           '_fw_rtl8261n_bin_bin', '_fw_rtl_nic_rtl8261c_bin_bin', 'w25n04lv_ooblayout_ecc')
 NOT_LINKED = ('mtk_bmt_attach', 'airoha_npu_probe')
 
@@ -43,8 +40,8 @@ def board(dtb):
 
     require(fdt.strings(tree['/']['compatible'])[0] == 'gemtek,w1700k-sdr',
             'DTB: wrong board compatible')
-    require(fdt.string(tree['/chosen']['bootargs']) == BOOTARGS,
-            'DTB: boot arguments differ from the installed layout')
+    require('bootargs' not in tree['/chosen'],
+            'DTB: bootargs must come from U-Boot, not the device tree')
     for label in ENABLED:
         require(fdt.string(node(label).get('status', b'okay\0')) == 'okay',
                 f'DTB: {label} is not enabled')
@@ -67,11 +64,11 @@ def board(dtb):
     for props in tree.values():
         if 'label' in props and 'reg' in props:
             name = fdt.string(props['label'])
-            if name in partitions.GEOMETRY:
+            if name in partitions.V2_GEOMETRY:
                 found[name] = (tuple(fdt.cells(props['reg'])), 'read-only' in props)
-    expected = {name: (extent, name in partitions.READ_ONLY['linux'])
-                for name, extent in partitions.GEOMETRY.items()}
-    require(found == expected, 'DTB: NAND partitions differ from platform/partitions.py')
+    expected = {name: (extent, name in partitions.V2_READ_ONLY['linux-v2'])
+                for name, extent in partitions.V2_GEOMETRY.items()}
+    require(found == expected, 'DTB: NAND partitions differ from platform/partitions.py v2')
     for name, (base, size) in RESERVED.items():
         require(fdt.cells(node(name)['reg']) == [0, base, 0, size] and 'no-map' in node(name),
                 f'DTB: reserved region {name} differs')

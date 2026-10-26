@@ -23,7 +23,8 @@ LOGS = BUILD / 'logs'
 
 BUILDROOT_OUT = BUILD / 'buildroot'
 HOST_BIN = BUILDROOT_OUT / 'host/bin'
-CROSS_COMPILE = str(HOST_BIN / 'aarch64-buildroot-linux-musl-')
+CROSS_COMPILE = os.environ.get('W1700K_CROSS_COMPILE',
+                               str(HOST_BIN / 'aarch64-buildroot-linux-musl-'))
 LINUX_OUT = BUILD / 'linux'
 KERNEL_IMAGE = LINUX_OUT / 'arch/arm64/boot/Image'
 DTB = LINUX_OUT / 'sdr/an7581-w1700k-sdr.dtb'

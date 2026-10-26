@@ -80,7 +80,7 @@ def symbols(elf):
     return found
 
 
-def check_image(name, out, config, limit):
+def check_image(name, out, config, limit, entry=ENTRY):
     """The linked layout: ARM64 Image header, entry branch and runtime extent.
 
     Stock jumps to ENTRY with the payload decompressed there; the runtime
@@ -91,21 +91,21 @@ def check_image(name, out, config, limit):
     nodtb = (out / 'u-boot-nodtb.bin').read_bytes()
     dtb = (out / 'u-boot.dtb').read_bytes()
     linked = symbols(out / 'u-boot')
-    require(image == nodtb + dtb and len(nodtb) == linked['_end'] - ENTRY,
+    require(image == nodtb + dtb and len(nodtb) == linked['_end'] - entry,
             f'{name}: the control DTB is not appended at _end')
     require(image[56:60] == b'ARM\x64', f'{name}: no ARM64 Image header')
     offset, size, flags = struct.unpack_from('<QQQ', image, 8)
     stack = int(config['CONFIG_SYS_INIT_SP_BSS_OFFSET'], 0)
-    expected = linked['__bss_start'] - ENTRY + max(linked['__bss_end'] - linked['__bss_start'],
+    expected = linked['__bss_start'] - entry + max(linked['__bss_end'] - linked['__bss_start'],
                                                    stack)
     require(offset == 0 and flags == 0xa and size == expected,
             f'{name}: Image header does not describe the linked runtime')
-    require(ENTRY + size <= limit, f'{name}: runtime reaches {ENTRY + size:#x}, past {limit:#x}')
+    require(entry + size <= limit, f'{name}: runtime reaches {entry + size:#x}, past {limit:#x}')
     branch = struct.unpack_from('<I', image)[0]
     displacement = branch & 0x3ffffff
     displacement -= (displacement & 0x2000000) << 1
     require(branch & 0xfc000000 == 0x14000000 and
-            ENTRY + 4 * displacement == linked['reset'],
+            entry + 4 * displacement == linked['reset'],
             f'{name}: the first instruction does not branch to reset')
     return image, dtb, linked
 
@@ -117,7 +117,7 @@ def require_config(name, config, enabled=(), disabled=()):
     require(not present, f'{name}: forbidden options are on: {", ".join(present)}')
 
 
-def stock_fit(description, node, payload, compression, dtb_path):
+def stock_fit(description, node, payload, compression, dtb_path, entry=ENTRY, fdt_load=FDT_LOAD):
     """A FIT stock U-Boot can boot: one ARM64 'kernel' at ENTRY plus our control DTB.
 
     Stock U-Boot 2014.04 verifies one SHA-1 hash per image and fails on an
@@ -131,13 +131,13 @@ def stock_fit(description, node, payload, compression, dtb_path):
         {node} {{
             data = /incbin/("{payload}");
             type = "kernel"; arch = "arm64"; os = "linux"; compression = "{compression}";
-            load = <{ENTRY:#x}>; entry = <{ENTRY:#x}>;
+            load = <{entry:#x}>; entry = <{entry:#x}>;
             hash-1 {{ algo = "sha1"; }};
         }};
         fdt {{
             data = /incbin/("{dtb_path}");
             type = "flat_dt"; arch = "arm64"; compression = "none";
-            load = <{FDT_LOAD:#x}>;
+            load = <{fdt_load:#x}>;
             hash-1 {{ algo = "sha1"; }};
         }};
     }};

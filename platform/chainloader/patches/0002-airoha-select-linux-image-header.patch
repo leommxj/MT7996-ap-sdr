@@ -1,0 +1,16 @@
+SPDX-License-Identifier: GPL-2.0+
+Subject: [PATCH] arm: airoha: select the Linux kernel image header for AN7581
+
+Stock U-Boot boots the chainloader as a Linux kernel and needs the ARM64
+Image header that reports the runtime size. The vendor loader build selects
+it; the upstream AN7581 target does not.
+
+--- a/arch/arm/mach-airoha/Kconfig
++++ b/arch/arm/mach-airoha/Kconfig
+@@ -22,5 +22,6 @@ config TARGET_AN7581
+ 	bool "Airoha AN7581 SoC"
+ 	select ARM64
++	select LINUX_KERNEL_IMAGE_HEADER
+ 	help
+ 	  The Airoha EN7581 is a ARM-based SoC with a quad-core Cortex-A7
+ 	  including NEON and GPU, Mali-450 graphics, several DDR3 options,
