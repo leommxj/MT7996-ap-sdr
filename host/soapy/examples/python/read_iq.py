@@ -7,7 +7,9 @@ Run after `w1700k-stream` is serving and the unit is reachable. The module must 
 The radio has no hardware timestamps; `timeNs` is 0. CS16 is the native format.
 """
 import argparse
+import os
 import time
+from pathlib import Path
 
 import numpy as np
 import SoapySDR
@@ -22,9 +24,33 @@ def main():
     parser.add_argument("--bandwidth", type=float, default=40e6)
     parser.add_argument("--seconds", type=float, default=1.0)
     parser.add_argument("--cmd", default="w1700k", help="path to the host w1700k command")
+    parser.add_argument("--module", default=os.environ.get("W1700K_SOAPY_MODULE"),
+                        help="path to libw1700kSupport.so (default: $W1700K_SOAPY_MODULE or next to this example)")
     args = parser.parse_args()
 
-    device = SoapySDR.Device({"driver": "w1700k", "band": args.band, "cmd": args.cmd})
+    module = args.module
+    if not module:
+        here = Path(__file__).resolve().parent.parent
+        for candidate in (here / "bin" / "libw1700kSupport.so",
+                          here / "build" / "libw1700kSupport.so"):
+            if candidate.is_file():
+                module = str(candidate)
+                break
+    if not module:
+        raise SystemExit("set --module or W1700K_SOAPY_MODULE to libw1700kSupport.so")
+
+    # Disable SoapySDR's automatic module loading. Otherwise a host with SoapyUHD
+    # installed can spend minutes scanning UHD networks before this driver is tried.
+    manager = SoapySDR.ModuleManager(False)
+    SoapySDR.loadModule(module)
+
+    # The Radioconda SWIG binding accepts SoapySDRKwargs reliably; a plain dict
+    # can reach Device::make() as no-match on this version.
+    device_args = SoapySDR.SoapySDRKwargs()
+    device_args["driver"] = "w1700k"
+    device_args["band"] = args.band
+    device_args["cmd"] = args.cmd
+    device = SoapySDR.Device(device_args)
     device.setSampleRate(SOAPY_SDR_RX, 0, args.rate)
     device.setFrequency(SOAPY_SDR_RX, 0, args.freq)
     device.setBandwidth(SOAPY_SDR_RX, 0, args.bandwidth)
@@ -50,6 +76,7 @@ def main():
     finally:
         device.deactivateStream(stream)
         device.closeStream(stream)
+        device.close()
 
     elapsed = time.monotonic() - started
     print("samples=%d  %.2f Msps  overflows=%d" % (total, total / elapsed / 1e6, overflows))
