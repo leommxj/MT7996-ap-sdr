@@ -101,7 +101,8 @@ class Controller:
                       'synth_locked': list(self.synth_locked)},
             'stream': {'running': self.packing is not None, 'packing': self.packing,
                        'sample_rate': cfg.sample_rate, 'center_hz': rfs['lo_hz']},
-            'rf': dict(rfs, lo_range_hz=list(self.lo_lock.get(self.band, LO_RANGE[self.band]))),
+            'rf': dict(rfs, lo_range_hz=list(self.lo_lock.get(self.band, LO_RANGE[self.band])),
+                       lo_ranges_hz={str(b): list(self.lo_lock.get(b, LO_RANGE[b])) for b in BANDS}),
             'error': self.error,
         }
 

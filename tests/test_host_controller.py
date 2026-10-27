@@ -257,6 +257,7 @@ class RfControl(ControllerTest):
         self.assertEqual((state['rf']['agc'], state['rf']['lna'], state['rf']['lpf']), (False, 2, 9))
         self.assertEqual(state['rf']['filter_mhz'], 80)
         self.assertEqual(state['rf']['lo_range_hz'], list(self.ctl.lo_lock[1]))
+        self.assertEqual(state['rf']['lo_ranges_hz'], {str(b): list(span) for b, span in self.ctl.lo_lock.items()})
         self.ctl.gain(agc=True)
         self.assertEqual(self.dev.rf_ops[-1], (rf.RF_GAIN, 1, rf.RF_GAIN_AGC, 0))
         self.assertEqual((self.ctl.state()['rf']['agc'], self.ctl.state()['rf']['lna']), (True, None))

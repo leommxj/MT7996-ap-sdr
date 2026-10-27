@@ -58,6 +58,7 @@ between them, in 1.22 kHz bins.*
 | [`host/stream/`](host/stream/README.md) | `w1700k-stream`, the host's one receiver of the export: the IQ stream in shared memory for every consumer, and the roll-off correction |
 | [`host/spectrum/`](host/spectrum/README.md) | The spectrum/waterfall web server |
 | [`host/recv/`](host/recv/README.md) | `sdr-recv`, the stream recorder |
+| [`host/soapy/`](host/soapy/README.md) | In-tree SoapySDR module (`driver=w1700k`) for GNU Radio, SDR++, CyberEther, Python and other SoapySDR clients |
 | [`init/`](init/README.md) | Installation from stock, updates, recovery, return to stock |
 | [`include/hw/`](include/hw/README.md) | Register reference: every known MT7996, A-die and AN7581 register, as C headers |
 | [`docs/`](docs/) | [Architecture](docs/architecture.md), [roadmap](docs/roadmap.md) |
@@ -76,6 +77,8 @@ dump of it (`init/rawdump`) for the maintainers.
 ```sh
 make                                   # everything, from public sources (~10 min plus downloads)
 make check                             # the test suite
+make soapy                             # optional SoapySDR module (libsoapysdr-dev + nlohmann-json3-dev)
+make check-soapy                       # optional Soapy integration tests (fake export)
 
 sudo init/host/link up IFACE           # 192.168.1.10/24 on the NIC cabled to lan3
 sudo init/host/tftp-forward enable IFACE

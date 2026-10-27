@@ -144,7 +144,8 @@ stream that ends on its own (overrun, lost source) is reported as an error in ST
            "bands_ready": [0, 1, 2], "synth_locked": [true, true, true]},
  "stream": {"running": true, "packing": "half", "sample_rate": 320000000, "center_hz": 5250000000},
  "rf": {"lo_hz": 5250000000, "agc": true, "lna": null, "lpf": null, "filter_mhz": 320,
-        "lo_range_hz": [4647562500, 7508048460]},
+        "lo_range_hz": [4647562500, 7508048460],
+        "lo_ranges_hz": {"0": [...], "1": [4647562500, 7508048460], "2": [...]}},
  "error": null}
 ```
 

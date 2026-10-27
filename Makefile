@@ -12,8 +12,8 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: all toolchain linux sdr rootfs loader chainloader dumper restorer images firmware host check \
-	clean distclean
+.PHONY: all toolchain linux sdr rootfs loader chainloader dumper restorer images firmware host soapy \
+	check check-soapy clean distclean
 
 all: images dumper restorer firmware host
 
@@ -63,9 +63,17 @@ host:
 	$(MAKE) -C host/spectrum
 	$(MAKE) -C host/recv
 
+# Optional: needs libsoapysdr-dev and nlohmann-json3-dev on the host.
+soapy:
+	$(MAKE) -C host/soapy
+
 check:
 	$(PYTHON) tools/check_hw_names.py
 	$(PYTHON) -m unittest discover -s tests
+
+check-soapy:
+	W1700K_STREAM_BIN=$(CURDIR)/host/stream/build/w1700k-stream \
+		$(PYTHON) -m unittest discover -s host/soapy/tests
 
 # Remove build outputs but keep downloads and prepared sources.
 clean:
@@ -73,7 +81,7 @@ clean:
 		platform/build/chainloader \
 		platform/build/dumper platform/build/restorer platform/build/mkimage \
 		platform/build/bootstrap platform/build/images platform/build/rootfs-overlay \
-		platform/build/logs \
+		platform/build/logs host/soapy/build \
 		kernel/w1700k_sdr/build
 
 # Remove everything the build created, downloads included.
