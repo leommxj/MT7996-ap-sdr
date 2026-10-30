@@ -88,10 +88,21 @@ Device arguments: `band=0|1|2|all`, `flatten=true`, `shm=/w1700k-stream`, `cmd=/
   request outside it to the edge, with a warning in the log.
 - **Gain.** With AGC on, gain settings are remembered and applied when AGC is turned off: the
   radio's gain command turns AGC off, and SDR++ sets every gain after the gain mode.
+  Applying manual gain or AGC stops capture, applies the gain with an RX pulse, allows 20 ms to
+  settle, then restarts capture. Use matching host code and firmware with `GAIN_APPLY` support;
+  older firmware refuses the command. Gain steps are indices, not calibrated dB.
 - **Formats.** CS16 (native, the radio's 14-bit samples, full scale 8192) and CF32 (full scale
   is 1.0; with `flatten` the correction can exceed it). Reads of any length are accepted.
 - **Gaps.** No hardware time. A lost completion, a new run (the unit's stream restarted) or
   falling a ring behind is reported as `SOAPY_SDR_OVERFLOW`; samples read before it are returned first.
+  An active `setSampleRate` serializes with reads, discards queued samples and requests a new service
+  run after the command. The next read reports one overflow, then waits for that boundary before
+  resuming at the live edge. This also applies to a failed rate command, which may have partially
+  changed the radio. A successful unchanged rate does not introduce a gap. This is a host discard
+  boundary, not a hardware timestamp for the first sample at the new rate. Applied gain changes
+  (including AGC and failed commands) use the same discard boundary; cached gain requests while
+  AGC is on do not interrupt reads. External control changes still need coordination with the reader.
+  A gain change at 320 Msps also waits for the packed stream's existing WA shutdown hold (about 3 s).
 - **Errors.** A command to the radio that fails is logged (with the command's own explanation) and
   not thrown, because SDR++ does not catch exceptions from setters; the getters keep reporting the
   radio's real state. Misuse of the API (an antenna or gain that does not exist, a transmit stream)
@@ -115,6 +126,10 @@ and its `memmove` gets a negative size. Press the play button instead.
   duplicated header. The layout version is checked by the service and the module.
 
 ## Layout and tests
+
+`examples/python/read_iq.py` defaults to band 0 / 2442 MHz, finds `build/libw1700kSupport.so`
+in the source tree or `bin/libw1700kSupport.so` in a test bundle, and prints the actual tuning.
+Use `--band all --antenna 5G --freq 5180000000` to select an antenna explicitly.
 
 | file | |
 |---|---|

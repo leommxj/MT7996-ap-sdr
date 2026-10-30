@@ -18,6 +18,7 @@ Rules the hardware imposes:
   main loop without a stream.
 - The LO is one TUNE, also mid-stream. A new sample rate on the band being streamed stops the stream,
   runs RATE and restarts it; switching to another band is one ICAPCR8 write mid-stream.
+- Gain changes stop capture, apply and settle the RX gain, then restart a previously running stream.
 - A stream's packing follows its sample rate (packing_for): raw 14-bit IQ up to 160 Msps, half
   above, where raw exceeds one 10 GbE link. Half is lossless (8 samples in 7 words), so it is not a
   setting; a band switch keeps a running half stream as it is, since half carries any rate.
@@ -306,9 +307,15 @@ class Controller:
             lna = lpf = None
         elif lna is None or lpf is None:
             raise ValueError('gain: agc, or both lna and lpf')
+        rf._check_gain(lna, lpf)
+        running = self.packing
+        if running:
+            self._stop()
         rf.set_gain(self._session(), self.band, lna, lpf)
         self.rf[self.band].update(agc=bool(agc), lna=lna, lpf=lpf)
         self._save()
+        if running:
+            self._start()
 
     def _filter(self, mhz):
         self._require_loaded()

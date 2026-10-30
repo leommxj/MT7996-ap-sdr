@@ -180,8 +180,8 @@ class RadioCode(unittest.TestCase):
 
     # --- the RF command builder (rfctl.c) ---
 
-    def rfctl(self, *ops, mode='rfctl'):
-        args = [str(x) for op in ops for x in op]
+    def rfctl(self, *ops, mode='rfctl', rc=None):
+        args = ([str(rc)] if rc is not None else []) + [str(x) for op in ops for x in op]
         out = subprocess.run([str(self.binary), mode, *args], capture_output=True, text=True, check=True).stdout
         return [json.loads(line) for line in out.splitlines()]
 
@@ -242,9 +242,49 @@ class RadioCode(unittest.TestCase):
             self.assertEqual((p['out'], p['check'], p['lo'], p['lo_hi']), (0, 0xFFFFFFFF, 0, 0))
             self.assertLessEqual(p['count'] - p['out'], rf.RF_OUT_MAX)
 
+    def test_gain_apply_preserves_rx_state_and_rejects_live_capture(self):
+        for band in range(3):
+            for lna in (2, rf.RF_GAIN_AGC):
+                p = self.rfctl((rf.RF_GAIN_APPLY | band << 8, lna, 5))[0]
+                arb = (0x820e3000, 0x820f3000, 0x830e3000)[band]
+                for capture, disabled in ((False, False), (True, False), (False, True)):
+                    with self.subTest(band=band, lna=lna, capture=capture, disabled=disabled):
+                        mem = {0x80023090: 0x403 if capture else 0x400,
+                               arb: 0xf0007105 | (0x200 if disabled else 0)}
+                        before = dict(mem)
+                        reads, transitions, elapsed, refused = [], [], 0, False
+                        for op, a, b, c in p['ops']:
+                            code = op & 0xff
+                            if code == rf.POLL:
+                                if mem.get(a, 0) & b != c:
+                                    refused = True
+                                    break
+                            elif code == rf.W32:
+                                mem[a] = b
+                            elif code == rf.RMW32:
+                                mem[a] = (mem[a] & ~b) | c
+                                transitions.append((elapsed, mem[a]))
+                            elif code == rf.DELAY:
+                                elapsed += op >> 12
+                            elif code == rf.R32:
+                                reads.append(mem[a])
+                            else:
+                                self.fail(f'unexpected gain op {code}')
+                        if capture or disabled:
+                            self.assertTrue(refused)
+                            self.assertEqual(mem, before, 'refuse before touching RX or gain')
+                        else:
+                            self.assertFalse(refused)
+                            self.assertEqual(mem[arb], before[arb])
+                            self.assertEqual([v for _, v in transitions], [before[arb] | 0x200, before[arb]])
+                            self.assertGreaterEqual(transitions[1][0] - transitions[0][0], 10)
+                            self.assertGreaterEqual(elapsed - transitions[1][0], 20000)
+                            self.assertEqual(reads, [0 if lna == rf.RF_GAIN_AGC else 0x525203] * rf.CHAINS[band])
+                            self.assertEqual(p['count'] - p['out'], rf.CHAINS[band])
+
     def test_mt7976_filters(self):
         """Band 0's filter independent of the bandwidth: codes 0..3 with MediaTek's 0x125 [22:20]
-        and the RC code; 320 MHz is code 3 widened, the trim 9 under the RC code (mt7976.h).
+        and the RC code; 320 MHz is code 3 widened, the trim 9 under the RC code, floored at 8.
         Refused before the bring-up has measured the RC code."""
         rc = 17                                            # radio_smoke RFCTL_RC_CODE
         narrow, wide = self.rfctl((rf.RF_FILTER, 160, 0), (rf.RF_FILTER, 320, 0))
@@ -258,6 +298,24 @@ class RadioCode(unittest.TestCase):
             self.assertEqual(p['out'], 16)
         uncal = self.rfctl((rf.RF_FILTER, 160, 0), (rf.RF_FILTER | 2 << 8, 320, 0), mode='rfctl-uncal')
         self.assertEqual([p['res'] for p in uncal], [CTL_BAD_ARG, 0])
+
+    def test_mt7976_wide_trim_floor(self):
+        """Low RC calibration codes must not recreate the observed wide-filter resonance.
+
+        The C builder must preserve native filters and unit A's 17->8 setting,
+        floor the failing unit's 14->5 at 8, and still subtract 9 above the floor.
+        """
+        for rc, expected in ((0, 8), (7, 8), (8, 8), (9, 8), (14, 8),
+                             (16, 8), (17, 8), (18, 9), (31, 22)):
+            with self.subTest(rc=rc):
+                native, wide = self.rfctl((rf.RF_FILTER, 160, 0), (rf.RF_FILTER, 320, 0),
+                                         mode='rfctl-rc', rc=rc)
+                for prog, trim in ((native, rc), (wide, expected)):
+                    self.assertEqual(prog['res'], 0)
+                    trim_ops = [tuple(op) for op in prog['ops'] if op[1] & 0xfff == 0xe51]
+                    self.assertEqual(trim_ops,
+                                     [rf.armw(rf.reg(0, k, 0xe51), 0x11f00,
+                                              trim << 8 | 0x10000) for k in range(4)])
 
     def test_rate_keeps_lo_and_filter(self):
         """RATE re-runs the bandwidth part of the channel set only: no synthesizer word, no filter
@@ -284,7 +342,9 @@ class RadioCode(unittest.TestCase):
                  ((rf.RF_TRIM, 31, 0), 0), ((rf.RF_TRIM, 32, 0), CTL_BAD_ARG),
                  ((rf.RF_FILTER, 10, 0), CTL_BAD_ARG), ((rf.RF_FILTER, 640, 0), CTL_BAD_ARG),
                  ((rf.RF_STATUS | 3 << 8, 0, 0), CTL_BAD_ARG), ((rf.RF_BAND | 3 << 8, 0, 0), CTL_BAD_ARG),
-                 ((0, 0, 0), CTL_BAD_ARG), ((rf.RF_BAND + 1, 0, 0), CTL_BAD_ARG)]
+                 ((0, 0, 0), CTL_BAD_ARG), ((rf.RF_GAIN_APPLY + 1, 0, 0), CTL_BAD_ARG),
+                 ((rf.RF_GAIN_APPLY, 5, 0), CTL_BAD_ARG), ((rf.RF_GAIN_APPLY, 0, 10), CTL_BAD_ARG),
+                 ((rf.RF_GAIN_APPLY | 3 << 8, 0, 0), CTL_BAD_ARG)]
         cases += [((rf.RF_FILTER, mhz, 0), 0) for mhz in rf.FILTER_CODE]
         results = self.rfctl(*(op for op, _ in cases))
         self.assertEqual([p['res'] for p in results], [want for _, want in cases])

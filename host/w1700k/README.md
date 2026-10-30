@@ -99,10 +99,17 @@ analog filter. Defaults, all set by every load:
 - The receiver state lives on the unit (`/tmp/w1700k-state.json`, cleared by a reboot), so CLI
   calls and a `serve` session share it. Streams run detached on the unit; each is one STREAM
   command to our WM, acknowledged when it ends. Streams start and stop without a reload.
-- RF control (tune, gain, filter, trim, band switch) is one RF command each, which our WM
+- RF control (tune, filter, trim, band switch) is one RF command each, which our WM
   expands and runs between stream chunks, or at once without a stream. A tune also rewrites the
   D-die words that follow the LO. Samples captured during a retune are invalid. The per-frequency
   calibration tables a SETUP applies (MediaTek's frequency groups) are not reloaded by a tune.
+- Gain changes stop a running capture and use `GAIN_APPLY`: write every chain's override,
+  pulse RX disable, wait 20 ms, then read back. Capture restarts only after success. A failure
+  leaves it stopped; invalid arguments are rejected before stopping. This prevents the old
+  delayed gain latch and excludes RX-pulse transients from capture. Update host and firmware
+  together: old firmware refuses `GAIN_APPLY`. Packed streams also have the existing roughly
+  3 s WA shutdown hold, so a live gain change is not instantaneous. Raw `RF_GAIN` remains a
+  development command that only writes registers and does not guarantee settled samples.
 - `band`/`configure` to another band switches the capture source (ICAPCR8) with an RF command,
   also mid-stream; a new LO is a TUNE, also mid-stream. A new sample rate stops a running stream,
   runs RATE and CAPTURE (no synthesizer retune: the LO, gain and filter stay) and restarts it,

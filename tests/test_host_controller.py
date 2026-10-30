@@ -5,6 +5,7 @@ import io
 import json
 import threading
 import unittest
+from unittest.mock import patch
 
 import host_fake
 from host_fake import RADIO_ERR_HW, RADIO_ERR_ORDER
@@ -250,7 +251,7 @@ class RfControl(ControllerTest):
         self.ctl.gain(lna=2, lpf=9)
         self.ctl.filter(80)
         self.assertEqual(self.ctl.trim(7), [0x10700] * 4)
-        self.assertEqual(self.dev.rf_ops, [(rf.RF_TUNE, 1, 5_300_000_000 & 0xFFFFFFFF, 1), (rf.RF_GAIN, 1, 2, 9),
+        self.assertEqual(self.dev.rf_ops, [(rf.RF_TUNE, 1, 5_300_000_000 & 0xFFFFFFFF, 1), (rf.RF_GAIN_APPLY, 1, 2, 9),
                                            (rf.RF_FILTER, 1, 80, 0), (rf.RF_TRIM, 1, 7, 0)])
         state = self.ctl.state()
         self.assertEqual((state['rf']['lo_hz'], state['stream']['center_hz']), (5_300_000_000, 5_300_000_000))
@@ -259,7 +260,7 @@ class RfControl(ControllerTest):
         self.assertEqual(state['rf']['lo_range_hz'], list(self.ctl.lo_lock[1]))
         self.assertEqual(state['rf']['lo_ranges_hz'], {str(b): list(span) for b, span in self.ctl.lo_lock.items()})
         self.ctl.gain(agc=True)
-        self.assertEqual(self.dev.rf_ops[-1], (rf.RF_GAIN, 1, rf.RF_GAIN_AGC, 0))
+        self.assertEqual(self.dev.rf_ops[-1], (rf.RF_GAIN_APPLY, 1, rf.RF_GAIN_AGC, 0))
         self.assertEqual((self.ctl.state()['rf']['agc'], self.ctl.state()['rf']['lna']), (True, None))
         self.assertEqual(self.dev.radio_commands, [], 'RF control is no radio command')
 
@@ -270,6 +271,49 @@ class RfControl(ControllerTest):
         self.assertTrue(self.dev.streaming)
         self.assertEqual(self.dev.lo[0], 2_450_000_000)
         self.assertEqual(self.ctl.state()['rf']['lo_range_hz'], list(self.ctl.lo_lock[0]))
+
+    def test_gain_restarts_capture_for_manual_and_agc(self):
+        self.loaded(2)
+        self.ctl.start()
+        with self.assertRaises(rf.CtlError):
+            rf.set_gain(self.ctl._session(), 2, 1, 5)
+        self.ctl.gain(lna=1, lpf=5)
+        self.assertTrue(self.dev.streaming)
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'half')
+        self.ctl.gain(agc=True)
+        self.assertTrue(self.dev.streaming)
+        self.assertEqual(self.commands(), ['stream'] * 3)
+        self.assertTrue(self.ctl.state()['rf']['agc'])
+
+    def test_invalid_gain_keeps_capture_running(self):
+        self.loaded(0)
+        self.ctl.start()
+        for lna, lpf in ((5, 0), (0, 10), (None, 2)):
+            with self.assertRaises(ValueError):
+                self.ctl.gain(lna=lna, lpf=lpf)
+        self.assertTrue(self.dev.streaming)
+        self.assertEqual(self.commands(), ['stream'])
+
+    def test_gain_failure_leaves_capture_stopped(self):
+        self.loaded(1)
+        self.ctl.start()
+        before = dict(self.ctl.rf[1])
+        with patch.object(rf, 'set_gain', side_effect=rf.CtlError('apply failed')):
+            with self.assertRaisesRegex(rf.CtlError, 'apply failed'):
+                self.ctl.gain(lna=2, lpf=5)
+        self.assertFalse(self.dev.streaming)
+        self.assertFalse(self.ctl.state()['stream']['running'])
+        self.assertEqual(self.ctl.rf[1], before)
+        self.assertEqual(self.commands(), ['stream'])
+
+    def test_gain_restart_failure_preserves_applied_gain(self):
+        self.loaded(1)
+        self.ctl.start()
+        self.dev.mtu = 1500
+        with self.assertRaises(stream.StreamError):
+            self.ctl.gain(lna=2, lpf=5)
+        self.assertFalse(self.ctl.state()['stream']['running'])
+        self.assertEqual((self.ctl.rf[1]['lna'], self.ctl.rf[1]['lpf']), (2, 5))
 
     def test_status(self):
         self.loaded(1)
@@ -468,7 +512,7 @@ class Serve(ControllerTest):
         self.assertEqual(handle(self.ctl, {'op': 'load'}), {})
         self.assertEqual(self.ctl.state()['radio']['band'], 1)
         handle(self.ctl, {'op': 'gain', 'lna': 1, 'lpf': 2})
-        self.assertEqual(self.dev.rf_ops[-1], (rf.RF_GAIN, 1, 1, 2))
+        self.assertEqual(self.dev.rf_ops[-1], (rf.RF_GAIN_APPLY, 1, 1, 2))
 
 if __name__ == '__main__':
     unittest.main()

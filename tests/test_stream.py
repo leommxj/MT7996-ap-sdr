@@ -10,6 +10,7 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import time
 import unittest
 
@@ -231,6 +232,15 @@ class StreamServiceTest(unittest.TestCase):
         run2 = self.wait_newest(40)
         self.assertEqual(run2, run + 1)
         self.assertEqual(self.shm.samples(0), unpacked(noise_words(300)), "the new run counts from its first slice")
+
+    def test_restarts_do_not_publish_old_indices_from_parallel_receivers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "ingest-restart")
+            subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-O2", "-pthread",
+                            "-I" + os.path.join(STREAM, "src"), os.path.join(ROOT, "tests", "ingest_restart.cpp"),
+                            os.path.join(STREAM, "src", "ingest.cpp"), "-o", binary], check=True, capture_output=True)
+            result = subprocess.run([binary, str(free_udp_port())], capture_output=True, text=True, timeout=35)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

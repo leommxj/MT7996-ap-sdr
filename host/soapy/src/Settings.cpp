@@ -82,6 +82,30 @@ bool SoapyW1700K::change(const std::vector<std::string> &args)
 
 int SoapyW1700K::band() const { return fixed_band_ >= 0 ? fixed_band_ : controller_.state().band; }
 
+void SoapyW1700K::discard_stream()
+{
+    if (!active_ || !ring_) return;
+    uint64_t newest;
+    w1700k_stream_position(ring_, &restart_run_, &newest);
+    __atomic_fetch_add(&ring_->restart_requests, uint64_t(1), __ATOMIC_ACQ_REL);
+    waiting_restart_ = true;
+    overflow_pending_ = true;
+}
+
+void SoapyW1700K::change_gain(const std::vector<std::string> &args)
+{
+    change(args);
+    discard_stream();  // also after failure: capture may have stopped or gain partly changed
+}
+
+std::unique_lock<std::mutex> SoapyW1700K::pause_reads()
+{
+    ++settings_waiting_;
+    std::unique_lock<std::mutex> reading(read_mutex_);
+    --settings_waiting_;
+    return reading;
+}
+
 bool SoapyW1700K::select_band()
 {
     if (fixed_band_ < 0 || controller_.state().band == fixed_band_) return true;
@@ -137,10 +161,11 @@ bool SoapyW1700K::hasGainMode(const int, const size_t) const { return true; }
 
 void SoapyW1700K::setGainMode(const int, const size_t, const bool automatic)
 {
+    auto reading = pause_reads();
     std::lock_guard<std::mutex> lock(settings_mutex_);
     if (!select_band()) return;
     if (automatic) {
-        change({"gain", "--agc"});
+        change_gain({"gain", "--agc"});
         return;
     }
     // Leaving AGC: apply the steps last asked for, else the ones the unit last reported, else
@@ -148,7 +173,7 @@ void SoapyW1700K::setGainMode(const int, const size_t, const bool automatic)
     const w1700k::RadioState state = controller_.state();
     const int lna = wanted_lna_ >= 0 ? wanted_lna_ : state.lna >= 0 ? state.lna : kLnaSteps;
     const int lpf = wanted_lpf_ >= 0 ? wanted_lpf_ : state.lpf >= 0 ? state.lpf : kLpfSteps;
-    change({"gain", "--lna", std::to_string(lna), "--lpf", std::to_string(lpf)});
+    change_gain({"gain", "--lna", std::to_string(lna), "--lpf", std::to_string(lpf)});
 }
 
 bool SoapyW1700K::getGainMode(const int, const size_t) const { return controller_.state().agc; }
@@ -171,6 +196,7 @@ void SoapyW1700K::set_gain_steps(int lna, int lpf)
 {
     lna = std::min(kLnaSteps, std::max(0, lna));
     lpf = std::min(kLpfSteps, std::max(0, lpf));
+    auto reading = pause_reads();
     std::lock_guard<std::mutex> lock(settings_mutex_);
     wanted_lna_ = lna;
     wanted_lpf_ = lpf;
@@ -178,7 +204,7 @@ void SoapyW1700K::set_gain_steps(int lna, int lpf)
     // sets every gain after the gain mode, whatever the mode is. setGainMode(false) applies them.
     if (controller_.state().agc) return;
     if (!select_band()) return;
-    change({"gain", "--lna", std::to_string(lna), "--lpf", std::to_string(lpf)});
+    change_gain({"gain", "--lna", std::to_string(lna), "--lpf", std::to_string(lpf)});
 }
 
 void SoapyW1700K::setGain(const int, const size_t, const double value)
@@ -274,10 +300,19 @@ void SoapyW1700K::setSampleRate(const int, const size_t, const double rate)
     if (std::fabs(nearest - rate) > kRateTolerance * nearest)
         SoapySDR::logf(SOAPY_SDR_WARNING, "W1700K: %.3f Msps is not offered; using %.0f Msps", rate / 1e6,
                        nearest / 1e6);
+    auto reading = pause_reads();
     std::lock_guard<std::mutex> lock(settings_mutex_);
     // `band B --rate R` is the host's way to change the rate; it also selects band B, which is why
     // it names the band this device is about. A running stream restarts at the new rate.
-    change({"band", std::to_string(band()), "--rate", std::to_string(long(nearest / 1e6))});
+    const auto before = controller_.state();
+    const bool succeeded = change({"band", std::to_string(band()), "--rate", std::to_string(long(nearest / 1e6))});
+    const auto after = controller_.state();
+    if (active_ && ring_ && (!succeeded || before.band != after.band ||
+                            before.sample_rate != after.sample_rate || before.capture_rate != after.capture_rate)) {
+        // The export sequence may stay continuous across a short stop. Discard the backlog and
+        // wait for an explicit service boundary after the command, even if it partially failed.
+        discard_stream();
+    }
 }
 
 double SoapyW1700K::getSampleRate(const int, const size_t) const { return controller_.state().sample_rate; }

@@ -11,6 +11,7 @@
 #include "hw/adie/sxchan.h"
 #include "hw/mt7996/icap.h"
 #include "hw/mt7996/phy.h"
+#include "hw/mt7996/phy_cal.h"
 #include "hw/mt7996/phy_chan.h"
 
 #include "radio.h"
@@ -392,7 +393,8 @@ uint32_t rfctl_tune(uint32_t band, uint64_t hz, struct rfctl_op *ops, uint32_t m
  * GAIN, FILTER, TRIM, STATUS, LOCKS, BAND
  * --------------------------------------------------------------------------------------------- */
 
-uint32_t rfctl_gain(uint32_t band, uint32_t lna, uint32_t lpf, struct rfctl_op *ops, uint32_t max)
+static uint32_t gain_program(uint32_t band, uint32_t lna, uint32_t lpf,
+			     struct rfctl_op *ops, uint32_t max, int apply)
 {
 	struct prog p = { ops, 0, max };
 	uint32_t word, c;
@@ -405,11 +407,27 @@ uint32_t rfctl_gain(uint32_t band, uint32_t lna, uint32_t lpf, struct rfctl_op *
 		word = MT7996_PHY_RXGAIN_FORCE_AB(lna, lpf);
 	else
 		return 0;
+	if (apply) {
+		/* Refuse before writing: the RX pulse creates invalid samples. */
+		put(&p, MT7996_PROBE_CTL_OP_POLL, MT7996_ICAP_CR0(0), MT7996_ICAP_CR0_EN, 0);
+		put(&p, MT7996_PROBE_CTL_OP_POLL, MT7996_LMAC_ARB_SCR(band), MT7996_LMAC_ARB_SCR_RX_DIS, 0);
+	}
 	for (c = 0; c < chains[band]; c++)
 		w32(&p, MT7996_PHY_RXGAIN(band, c), word);
+	if (apply) {
+		rmw32(&p, MT7996_LMAC_ARB_SCR(band), MT7996_LMAC_ARB_SCR_RX_DIS, MT7996_LMAC_ARB_SCR_RX_DIS);
+		put(&p, MT7996_PROBE_CTL_OP_DELAY | HW_PREP(MT7996_PROBE_CTL_OP_ARG, 10), 0, 0, 0);
+		rmw32(&p, MT7996_LMAC_ARB_SCR(band), MT7996_LMAC_ARB_SCR_RX_DIS, 0);
+		put(&p, MT7996_PROBE_CTL_OP_DELAY | HW_PREP(MT7996_PROBE_CTL_OP_ARG, RFCTL_GAIN_SETTLE_US), 0, 0, 0);
+	}
 	for (c = 0; c < chains[band]; c++)
 		r32(&p, MT7996_PHY_RXGAIN(band, c));
 	return done(&p);
+}
+
+uint32_t rfctl_gain(uint32_t band, uint32_t lna, uint32_t lpf, struct rfctl_op *ops, uint32_t max)
+{
+	return gain_program(band, lna, lpf, ops, max, 0);
 }
 
 uint32_t rfctl_filter_regs(uint32_t band, uint32_t code, struct rfctl_filter *f)
@@ -436,6 +454,8 @@ uint32_t rfctl_filter_regs(uint32_t band, uint32_t code, struct rfctl_filter *f)
 		f->code = MT7976_RX_BW_CODE_MAX;
 		f->ext = MT7976_RXF_125_EXT_WIDE;
 		f->trim = cal > MT7976_RXF_WIDE_TRIM_DROP ? cal - MT7976_RXF_WIDE_TRIM_DROP : 0;
+		if (f->trim < MT7976_RXF_WIDE_TRIM_MIN)
+			f->trim = MT7976_RXF_WIDE_TRIM_MIN;
 	}
 	return 1;
 }
@@ -543,6 +563,10 @@ uint32_t rfctl_build(uint32_t a, uint32_t b, uint32_t c, struct rfctl_prog *p)
 	case MT7996_PROBE_CTL_RF_GAIN:
 		n = rfctl_gain(band, b, c, rfctl_buf, RFCTL_MAX_OPS);
 		out = n / 2u;			/* the read-backs */
+		break;
+	case MT7996_PROBE_CTL_RF_GAIN_APPLY:
+		n = gain_program(band, b, c, rfctl_buf, RFCTL_MAX_OPS, 1);
+		out = n ? n - chains[band] : 0;
 		break;
 	case MT7996_PROBE_CTL_RF_FILTER:
 		n = rfctl_filter(band, b, rfctl_buf, RFCTL_MAX_OPS);

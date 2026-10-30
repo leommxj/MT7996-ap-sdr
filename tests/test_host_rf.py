@@ -35,7 +35,7 @@ class Mirrors(unittest.TestCase):
         self.assertEqual(rf.SOFT, h['MT7996_PROBE_CTL_OP_SOFT'])
         codes = ('BAD_OP', 'TIMEOUT', 'TOO_MANY', 'SEMA', 'BUSY', 'SPI', 'BAD_ARG')
         self.assertEqual(sorted(rf.STATUS), [h[f'MT7996_PROBE_CTL_{c}'] for c in codes])
-        commands = ('TUNE', 'GAIN', 'FILTER', 'TRIM', 'STATUS', 'LOCKS', 'BAND')
+        commands = ('TUNE', 'GAIN', 'FILTER', 'TRIM', 'STATUS', 'LOCKS', 'BAND', 'GAIN_APPLY')
         self.assertEqual([getattr(rf, f'RF_{c}') for c in commands], [h[f'MT7996_PROBE_CTL_RF_{c}'] for c in commands])
         self.assertEqual((rf.RF_GAIN_AGC, rf.RF_UNLOCKED),
                          (h['MT7996_PROBE_CTL_RF_GAIN_AGC'], h['MT7996_PROBE_CTL_RF_UNLOCKED']))
@@ -178,7 +178,7 @@ class Commands(unittest.TestCase):
         self.assertEqual(rf.set_gain(self.session, 0), [0] * 4)
         self.assertEqual(rf.set_filter(self.session, 2, 320), [4] * 5)
         self.assertEqual(rf.set_trim(self.session, 1, 31), [0x11F00] * 4)
-        self.assertEqual(self.dev.rf_ops, [(rf.RF_GAIN, 0, 2, 9), (rf.RF_GAIN, 0, rf.RF_GAIN_AGC, 0),
+        self.assertEqual(self.dev.rf_ops, [(rf.RF_GAIN_APPLY, 0, 2, 9), (rf.RF_GAIN_APPLY, 0, rf.RF_GAIN_AGC, 0),
                                            (rf.RF_FILTER, 2, 320, 0), (rf.RF_TRIM, 1, 31, 0)])
         for bad in (lambda: rf.set_gain(self.session, 0, 2), lambda: rf.set_gain(self.session, 0, 5, 0),
                     lambda: rf.set_gain(self.session, 0, 0, 10), lambda: rf.set_filter(self.session, 0, 30),

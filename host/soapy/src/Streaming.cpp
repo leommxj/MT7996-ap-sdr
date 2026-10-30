@@ -195,6 +195,8 @@ int SoapyW1700K::activateStream(SoapySDR::Stream *stream, const int flags, const
     run_ = run;
     next_slice_ = newest;
     slice_offset_ = 0;
+    waiting_restart_ = false;
+    overflow_pending_ = false;
     active_ = true;
     return 0;
 }
@@ -214,9 +216,15 @@ int SoapyW1700K::readStream(SoapySDR::Stream *stream, void *const *buffs, const 
 {
     flags = 0;   // no end-of-burst, no hardware time
     timeNs = 0;
+    if (settings_waiting_) return SOAPY_SDR_TIMEOUT;
     std::lock_guard<std::mutex> reading(read_mutex_);
     if (stream != reinterpret_cast<SoapySDR::Stream *>(&rx_stream_) || !active_ || !ring_ || !buffs || !buffs[0])
         return SOAPY_SDR_STREAM_ERROR;
+    if (overflow_pending_) {
+        overflow_pending_ = false;
+        slice_offset_ = 0;
+        return SOAPY_SDR_OVERFLOW;
+    }
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::microseconds(std::min(std::max(timeoutUs, 0L), kMaxTimeoutUs));
@@ -236,8 +244,20 @@ int SoapyW1700K::readStream(SoapySDR::Stream *stream, void *const *buffs, const 
     };
 
     for (;;) {
+        if (settings_waiting_) return done ? int(done) : SOAPY_SDR_TIMEOUT;
         uint64_t run, newest;
         w1700k_stream_position(ring_, &run, &newest);
+        if (waiting_restart_) {
+            if (run == restart_run_) {
+                if (std::chrono::steady_clock::now() >= deadline)
+                    return w1700k_stream_alive(ring_) ? SOAPY_SDR_TIMEOUT : SOAPY_SDR_STREAM_ERROR;
+                std::this_thread::sleep_for(kPollInterval);
+                continue;
+            }
+            run_ = run;
+            next_slice_ = newest;
+            waiting_restart_ = false;
+        }
 
         // A new run: the unit's stream restarted (a rate change, say). Nothing of the old run follows.
         if (run != run_) return gap(run, 0);

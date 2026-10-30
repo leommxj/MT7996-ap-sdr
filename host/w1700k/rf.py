@@ -32,6 +32,7 @@ STATUS = {1: 'bad op', 2: 'timeout', 3: 'too many ops', 4: 'RF-SPI semaphore not
           5: 'SPI master busy', 6: 'SPI transfer did not finish', 7: 'RF command or argument refused'}
 # RF commands (include/hw/mt7996/probe_page.h "RF commands"): op RF, a = command | band << 8.
 RF_TUNE, RF_GAIN, RF_FILTER, RF_TRIM, RF_STATUS, RF_LOCKS, RF_BAND = range(1, 8)
+RF_GAIN_APPLY = 8
 RF_GAIN_AGC = 0xFFFFFFFF
 RF_UNLOCKED = 8                   # an RF op's result: the tune's VCO did not lock
 RF_BLOCK = CTL_BASE + 0xA40       # LO Hz [31:0], LO Hz [63:32], ops, outs, then the result words
@@ -301,10 +302,11 @@ def tune(session, band, f_hz):
 
 
 def set_gain(session, band, lna=None, lpf=None):
-    """(lna, lpf) forced on every chain, or the AGC (both None). Returns the read-back words."""
+    """Apply forced gain or AGC, pulse RX and settle. Requires stopped capture and
+    firmware with GAIN_APPLY support; returns every chain's read-back word."""
     _check_gain(lna, lpf)
     agc = lna is None and lpf is None
-    return rf_command(session, RF_GAIN, band, RF_GAIN_AGC if agc else lna, 0 if agc else lpf)[1]
+    return rf_command(session, RF_GAIN_APPLY, band, RF_GAIN_AGC if agc else lna, 0 if agc else lpf)[1]
 
 
 def set_filter(session, band, mhz):

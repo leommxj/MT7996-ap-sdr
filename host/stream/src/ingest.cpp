@@ -38,8 +38,6 @@ void atomic_max(std::atomic<uint64_t> &a, uint64_t v)
         ;
 }
 
-std::mutex run_mutex;
-
 }  // namespace
 
 SampleRing::SampleRing(unsigned capacity_slices)
@@ -205,18 +203,25 @@ void Ingest::take(Worker &w, const uint8_t *data, size_t n, bool fresh, uint64_t
         return;
     }
 
+    // A reset must wait for old writers, including their final newest_ update. Otherwise an
+    // old index can advance the new run past samples that have not arrived and create false loss.
+    std::shared_lock<std::shared_mutex> writing(run_mutex_);
     uint64_t run = run_.load(std::memory_order_acquire), base = base_.load(std::memory_order_acquire);
     auto jumped = [](uint64_t seq, uint64_t base) {
         return seq < base ? base - seq > kRunJumpBack : seq - base > kRunJumpForward;
     };
     if (!run || jumped(seq, base) || new_run_.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(run_mutex);
-        if (run_.load() == run && (new_run_.exchange(false) || !run || jumped(seq, base_.load()))) {
-            base_.store(seq);
-            newest_.store(0);
-            started_ns_.store(t);
-            run_.store(run + 1, std::memory_order_release);
+        writing.unlock();
+        {
+            std::unique_lock<std::shared_mutex> lock(run_mutex_);
+            if (run_.load() == run && (new_run_.exchange(false) || !run || jumped(seq, base_.load()))) {
+                base_.store(seq);
+                newest_.store(0);
+                started_ns_.store(t);
+                run_.store(run + 1, std::memory_order_release);
+            }
         }
+        writing.lock();
         run = run_.load(std::memory_order_acquire);
         base = base_.load(std::memory_order_acquire);
     }
@@ -279,10 +284,8 @@ void Ingest::check(Worker &w, uint64_t run, uint64_t index)
 
 Ingest::Position Ingest::position() const
 {
-    for (;;) {
-        const uint64_t run = run_.load(std::memory_order_acquire), newest = newest_.load(std::memory_order_acquire);
-        if (run_.load(std::memory_order_acquire) == run) return {run, newest};
-    }
+    std::shared_lock<std::shared_mutex> lock(run_mutex_);
+    return {run_.load(std::memory_order_acquire), newest_.load(std::memory_order_acquire)};
 }
 
 void Ingest::restart_run() { new_run_.store(true, std::memory_order_release); }

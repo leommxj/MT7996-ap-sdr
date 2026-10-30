@@ -295,6 +295,9 @@
  *   GAIN    b = LNA index 0..4, c = LPF index 0..9, forced on every chain
  *           (phy.h MT7996_PHY_RXGAIN_FORCE_AB); b = RF_GAIN_AGC hands the
  *           gain back to the AGC
+ *   GAIN_APPLY  GAIN with an RX-disable pulse and settling delay; ICAP0 must
+ *           be stopped and the band's RX enabled. Use this for normal gain
+ *           changes; GAIN alone only writes the override registers.
  *   FILTER  b = analog RX bandwidth in MHz: 20, 40, 80, 160 or 320; on band 0
  *           (MT7976) 320 is code 3 widened (firmware/radio/rfctl.h), which
  *           also sets the RC trim; refused there before the bring-up
@@ -317,6 +320,7 @@
 #define   MT7996_PROBE_CTL_RF_STATUS      5u
 #define   MT7996_PROBE_CTL_RF_LOCKS       6u
 #define   MT7996_PROBE_CTL_RF_BAND        7u
+#define   MT7996_PROBE_CTL_RF_GAIN_APPLY  8u
 #define   MT7996_PROBE_CTL_RF_GAIN_AGC    0xffffffffu
 /*
  * The RF block, after the CTL mailbox: the report of the last RF op. Every
@@ -329,7 +333,7 @@
  *     TUNE    SX status (0xca4), Vtune (0xcd1), comparator (0xca5), then
  *             the done word (0xca7, MT7977) or band word (0xa01, MT7976),
  *             and 0 (the firmware's frequency note, a write)
- *     GAIN    every chain's RXGAIN read back
+ *     GAIN / GAIN_APPLY  every chain's RXGAIN read back
  *     FILTER  every chain's ADIE_RX_BW_RB
  *     TRIM    every chain's ADIE_RCTRIM as written
  *     STATUS  SX INT, FRAC, CFG and status, the frequency note, every

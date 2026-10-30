@@ -14,10 +14,12 @@
 #include <SoapySDR/Formats.hpp>
 
 #include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -86,6 +88,148 @@ int stream(SoapySDR::Device *device, const std::string &format, double seconds)
     return 0;
 }
 
+int gains(SoapySDR::Device *device, const std::string &format)
+{
+    const bool cf32 = format == "CF32";
+    auto *rx = device->setupStream(SOAPY_SDR_RX, format);
+    if (device->activateStream(rx) != 0) return 1;
+    std::vector<int16_t> cs(6000);
+    std::vector<float> cf(6000);
+    void *buffers[] = {cf32 ? static_cast<void *>(cf.data()) : static_cast<void *>(cs.data())};
+    int flags = 0;
+    long long ns = 0;
+    for (int step = 0; step < 6; ++step) {
+        // Cached steps while AGC is on must not interrupt the stream.
+        device->setGainMode(SOAPY_SDR_RX, 0, true);
+        for (int n = 0; n < 12; ++n) device->readStream(rx, buffers, 3000, flags, ns, 100000);
+        device->setGain(SOAPY_SDR_RX, 0, "LNA", 0);
+        device->setGain(SOAPY_SDR_RX, 0, "LPF", 5);
+        const int cached = device->readStream(rx, buffers, 1000, flags, ns, 100000);
+        if (step != 0) {
+            device->setGainMode(SOAPY_SDR_RX, 0, false);
+            for (int n = 0; n < 12; ++n) device->readStream(rx, buffers, 3000, flags, ns, 100000);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        if (step == 0 || (step < 4 && device->getGainMode(SOAPY_SDR_RX, 0)))
+            device->setGainMode(SOAPY_SDR_RX, 0, false);
+        else if (step == 1) device->setGain(SOAPY_SDR_RX, 0, "LNA", 2);
+        else if (step == 2) device->setGain(SOAPY_SDR_RX, 0, "LPF", 3);
+        else if (step == 3) device->setGain(SOAPY_SDR_RX, 0, 8);
+        else if (step == 4) device->setGainMode(SOAPY_SDR_RX, 0, true);
+        else device->setGainMode(SOAPY_SDR_RX, 0, false);
+        const int target = device->getGainMode(SOAPY_SDR_RX, 0) ? 100 :
+            int(device->getGain(SOAPY_SDR_RX, 0, "LNA") * 10 + device->getGain(SOAPY_SDR_RX, 0, "LPF"));
+        const int first = device->readStream(rx, buffers, 3000, flags, ns, 100000);
+        int overflows = first == SOAPY_SDR_OVERFLOW, bad = 0, samples = 0;
+        for (int n = 0; n < 12; ++n) {
+            const int count = device->readStream(rx, buffers, 3000, flags, ns, 100000);
+            if (count == SOAPY_SDR_OVERFLOW) ++overflows;
+            if (count <= 0) continue;
+            samples += count;
+            for (int k = 0; k < count; ++k) {
+                const int i = cf32 ? int(std::lround(cf[2 * k] * 8192)) : cs[2 * k];
+                if (i != target) ++bad;
+            }
+        }
+        std::printf("{\"step\": %d, \"first\": %d, \"overflows\": %d, \"samples\": %d, "
+                    "\"bad_samples\": %d, \"cached_read\": %d}\n", step, first, overflows, samples, bad, cached);
+    }
+    device->deactivateStream(rx);
+    device->closeStream(rx);
+    return 0;
+}
+
+int gains_concurrent(SoapySDR::Device *device, const std::string &format)
+{
+    const bool cf32 = format == "CF32";
+    device->setGainMode(SOAPY_SDR_RX, 0, false);
+    device->setGain(SOAPY_SDR_RX, 0, "LPF", 5);
+    auto *rx = device->setupStream(SOAPY_SDR_RX, format);
+    if (device->activateStream(rx) != 0) return 1;
+    std::atomic<bool> stop{false};
+    std::atomic<int> generation{0}, expected{45};
+    long long samples = 0, overflows = 0, errors = 0, bad = 0;
+    std::thread reader([&] {
+        std::vector<int16_t> cs(6000);
+        std::vector<float> cf(6000);
+        void *buffers[] = {cf32 ? static_cast<void *>(cf.data()) : static_cast<void *>(cs.data())};
+        while (!stop) {
+            const int before = generation.load();
+            const int target = expected.load();
+            int flags = 0;
+            long long ns = 0;
+            const int count = device->readStream(rx, buffers, 3000, flags, ns, 10000);
+            if (count == SOAPY_SDR_OVERFLOW) ++overflows;
+            else if (count < 0 && count != SOAPY_SDR_TIMEOUT) ++errors;
+            else if (count > 0 && !(before & 1) && before == generation.load()) {
+                samples += count;
+                for (int k = 0; k < count; ++k) {
+                    const int i = cf32 ? int(std::lround(cf[2 * k] * 8192)) : cs[2 * k];
+                    if (i != target) ++bad;
+                }
+            }
+        }
+    });
+    double longest = 0;
+    for (int lna : {0, 1, 2, 1, 0, 4}) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        ++generation;
+        const auto start = std::chrono::steady_clock::now();
+        device->setGain(SOAPY_SDR_RX, 0, "LNA", lna);
+        longest = std::max(longest, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        expected = lna * 10 + 5;
+        ++generation;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop = true;
+    reader.join();
+    device->deactivateStream(rx);
+    device->closeStream(rx);
+    std::printf("{\"samples\": %lld, \"overflows\": %lld, \"errors\": %lld, \"bad_samples\": %lld, "
+                "\"longest_setter_seconds\": %.6f}\n", samples, overflows, errors, bad, longest);
+    return 0;
+}
+
+int rates(SoapySDR::Device *device, const std::string &format)
+{
+    const bool cf32 = format == "CF32";
+    auto *rx = device->setupStream(SOAPY_SDR_RX, format);
+    if (device->activateStream(rx) != 0) return 1;
+    std::vector<int16_t> cs(6000);
+    std::vector<float> cf(6000);
+    void *buffers[] = {cf32 ? static_cast<void *>(cf.data()) : static_cast<void *>(cs.data())};
+    int flags = 0;
+    long long ns = 0;
+    for (double rate : {40e6, 80e6, 160e6, 320e6, 80e6}) {
+        device->readStream(rx, buffers, 1000, flags, ns, 100000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        const auto changed = std::chrono::steady_clock::now();
+        device->setSampleRate(SOAPY_SDR_RX, 0, rate);
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - changed).count();
+        const double actual = device->getSampleRate(SOAPY_SDR_RX, 0);
+        const int first = device->readStream(rx, buffers, 3000, flags, ns, 100000);
+        int overflows = first == SOAPY_SDR_OVERFLOW, bad = 0, samples = 0;
+        for (int n = 0; n < 12; ++n) {
+            const int count = device->readStream(rx, buffers, 3000, flags, ns, 100000);
+            if (count == SOAPY_SDR_OVERFLOW) ++overflows;
+            if (count <= 0) continue;
+            samples += count;
+            for (int k = 0; k < count; ++k) {
+                const int i = cf32 ? int(std::lround(cf[2 * k] * 8192)) : cs[2 * k];
+                if (i != int(actual / 1e6)) ++bad;
+            }
+        }
+        device->setSampleRate(SOAPY_SDR_RX, 0, actual);
+        const int same = device->readStream(rx, buffers, 3000, flags, ns, 100000);
+        std::printf("{\"rate\": %.0f, \"change_seconds\": %.6f, \"first\": %d, \"overflows\": %d, "
+                    "\"samples\": %d, \"bad_samples\": %d, \"same_rate_read\": %d}\n",
+                    actual, seconds, first, overflows, samples, bad, same);
+    }
+    device->deactivateStream(rx);
+    device->closeStream(rx);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char **argv)
@@ -114,6 +258,12 @@ int main(int argc, char **argv)
         std::printf("{\"frequency\": %.0f}\n", device->getFrequency(SOAPY_SDR_RX, 0));
     } else if (mode == "stream" && argc == 5) {
         status = stream(device, argv[3], std::atof(argv[4]));
+    } else if (mode == "rates" && argc == 4) {
+        status = rates(device, argv[3]);
+    } else if (mode == "gains" && argc == 4) {
+        status = gains(device, argv[3]);
+    } else if (mode == "gains-concurrent" && argc == 4) {
+        status = gains_concurrent(device, argv[3]);
     } else {
         status = 2;
     }

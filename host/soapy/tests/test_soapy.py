@@ -41,7 +41,7 @@ STATE = {
 # A stand-in for the `w1700k` command: logs its arguments, applies the few commands the module sends to a
 # state file, prints the state. FAKE_FAIL=<command> makes that command fail the way the real one does.
 FAKE_COMMAND = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 state_path, log_path = os.environ["FAKE_STATE"], os.environ["FAKE_LOG"]
 args = sys.argv[1:]
 with open(log_path, "a") as log:
@@ -53,11 +53,18 @@ state = json.load(open(state_path))
 if args[0] == "tune":
     state["radio"]["lo_hz"] = state["rf"]["lo_hz"] = int(args[1])
 elif args[0] == "band":
+    time.sleep(0.1)
     state["radio"]["band"] = int(args[1])
     if "--rate" in args:
         state["radio"]["sample_rate"] = state["radio"]["capture_rate"] = int(args[args.index("--rate") + 1]) * 1000000
 elif args[0] == "start":
     state["stream"]["running"] = True
+elif args[0] == "gain":
+    time.sleep(0.1)
+    automatic = "--agc" in args
+    state["rf"]["agc"] = automatic
+    state["rf"]["lna"] = None if automatic else int(args[args.index("--lna") + 1])
+    state["rf"]["lpf"] = None if automatic else int(args[args.index("--lpf") + 1])
 json.dump(state, open(state_path, "w"))
 print(json.dumps(state))
 '''
@@ -91,11 +98,13 @@ class Sender(threading.Thread):
     of every that many is never sent (a lost slice, wherever a reader happens to start); `event` is
     sent as a firmware event."""
 
-    def __init__(self, port, lose_every=None, event=None):
+    def __init__(self, port, lose_every=None, event=None, rate_state=None, gain_state=None):
         super().__init__(daemon=True)
         self.port, self.lose_every, self.event = port, lose_every, event
         self.stop_flag = threading.Event()
         self.sent = 0
+        self.rate_state = rate_state
+        self.gain_state = gain_state
 
     def run(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -105,7 +114,25 @@ class Sender(threading.Thread):
                 if seq == self.event:
                     payload = b"\x00" * 64
                 else:
-                    payload = struct.pack("<%dI" % SLICE, *[((seq % 8192) << 16) | n for n in range(SLICE)])
+                    value = (seq - int(self.event is not None and seq > self.event)) % 8192
+                    if self.rate_state:
+                        try:
+                            with open(self.rate_state) as f:
+                                value = json.load(f)["radio"]["sample_rate"] // 1000000
+                        except json.JSONDecodeError:
+                            continue
+                    if self.gain_state:
+                        try:
+                            with open(self.gain_state) as f:
+                                gain = json.load(f)["rf"]
+                            value = 100 if gain["agc"] else gain["lna"] * 10 + gain["lpf"]
+                        except json.JSONDecodeError:
+                            continue
+                    words = [(value << 16) | n for n in range(SLICE)]
+                    if self.rate_state and value == 320 and seq % 2:
+                        words = [words[g + k] | ((words[g + 7] << (14 - 2 * k)) & 0xC000C000)
+                                 for g in range(0, SLICE, 8) for k in range(7)]
+                    payload = struct.pack("<%dI" % len(words), *words)
                 sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
             seq += 1
             self.sent = seq
@@ -135,7 +162,7 @@ class SoapyModuleTest(unittest.TestCase):
         os.chmod(cls.fake, os.stat(cls.fake).st_mode | stat.S_IXUSR)
 
         # One service for all the tests: it takes a while to start (it plans its FFTs, about a minute on
-        # a busy machine). A new test's sender starts a new run, which the service handles by itself.
+        # a busy machine). Each independent sender explicitly starts a new run.
         cls.name = "/w1700k-soapy-test-%d" % os.getpid()
         cls.port = free_udp_port()
         cls.service = subprocess.Popen([STREAM_BINARY, "--bind", "127.0.0.1", "--port", str(cls.port), "--name", cls.name,
@@ -177,12 +204,13 @@ class SoapyModuleTest(unittest.TestCase):
     def start_sender(self, **kwargs):
         """Starts sending, and returns once the service publishes the new stream."""
         run, newest = self.shm.position()
+        self.shm.set("restart_requests", self.shm.get("restart_requests") + 1)
         self.sender = Sender(self.port, **kwargs)
         self.sender.start()
         deadline = time.monotonic() + 15
         while True:
             now_run, now_newest = self.shm.position()
-            if now_newest >= 200 and (now_run != run or now_newest > newest + 200):
+            if now_newest >= 200 and now_run != run:
                 return
             self.assertLess(time.monotonic(), deadline, "the service published nothing")
             time.sleep(0.02)
@@ -287,6 +315,66 @@ class SoapyModuleTest(unittest.TestCase):
                          (320000000, 320000000, 320000000, 0))
         self.run_client("stream", self.device(1) + ",flatten=true", "CS16", "0.3")
         self.assertEqual(self.shm.get("flatten"), 1)
+
+    def test_short_rate_changes_discard_backlog_and_report_one_boundary(self):
+        self.start_sender(rate_state=self.state_path)
+        for fmt in ("CS16", "CF32"):
+            result = self.run_client("rates", self.device(1), fmt)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            rows = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertEqual(len(rows), 5)
+            for row in rows:
+                self.assertEqual(row["first"], -4, row)
+                self.assertEqual(row["overflows"], 1, row)
+                self.assertEqual(row["bad_samples"], 0, row)
+                self.assertGreater(row["samples"], 10000, row)
+                self.assertLess(row["change_seconds"], 1, row)
+                self.assertGreater(row["same_rate_read"], 0, row)
+
+    def test_gain_changes_discard_backlog_and_report_boundary(self):
+        self.start_sender(gain_state=self.state_path)
+        for fmt in ("CS16", "CF32"):
+            result = self.run_client("gains", self.device(1), fmt)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            rows = list(map(json.loads, result.stdout.splitlines()))
+            self.assertEqual(len(rows), 6)
+            for row in rows:
+                self.assertEqual(row["first"], -4, row)
+                self.assertEqual(row["overflows"], 1, row)
+                self.assertEqual(row["bad_samples"], 0, row)
+                self.assertGreater(row["samples"], 10000, row)
+                self.assertGreater(row["cached_read"], 0, row)
+
+    def test_failed_gain_change_still_discards_backlog(self):
+        self.start_sender(gain_state=self.state_path)
+        result = self.run_client("gains", self.device(1), "CS16", fail="gain")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for row in map(json.loads, result.stdout.splitlines()):
+            self.assertEqual(row["first"], -4, row)
+            self.assertEqual(row["overflows"], 1, row)
+            self.assertEqual(row["bad_samples"], 0, row)
+
+    def test_concurrent_reads_and_gain_changes(self):
+        self.start_sender(gain_state=self.state_path)
+        for fmt in ("CS16", "CF32"):
+            result = self.run_client("gains-concurrent", self.device(1), fmt, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            row = json.loads(result.stdout)
+            self.assertGreater(row["samples"], 10000, row)
+            self.assertEqual(row["overflows"], 6, row)
+            self.assertEqual(row["errors"], 0, row)
+            self.assertEqual(row["bad_samples"], 0, row)
+            self.assertLess(row["longest_setter_seconds"], 2, row)
+
+    def test_failed_rate_change_still_discards_queued_data(self):
+        self.start_sender(rate_state=self.state_path)
+        result = self.run_client("rates", self.device(1), "CS16", fail="band")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for row in map(json.loads, result.stdout.splitlines()):
+            self.assertEqual(row["rate"], 320000000)
+            self.assertEqual(row["first"], -4)
+            self.assertEqual(row["overflows"], 1)
+            self.assertEqual(row["bad_samples"], 0)
 
 
 if __name__ == "__main__":

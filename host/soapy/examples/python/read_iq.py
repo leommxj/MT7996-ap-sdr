@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Minimal SoapySDR receive example for the W1700K.
 
-Run after `w1700k-stream` is serving and the unit is reachable. The module must be installed or
-`SOAPY_SDR_PLUGIN_PATH` must point at `host/soapy/build`.
+Run after `w1700k-stream` is serving and the unit is reachable. The module is found in the source
+tree's build directory, a test bundle's bin directory, or via --module / W1700K_SOAPY_MODULE.
 
 The radio has no hardware timestamps; `timeNs` is 0. CS16 is the native format.
 """
@@ -18,21 +18,25 @@ from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_OVERFLOW, SOAPY_SDR_RX, SOAPY_SDR
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--band", default="all", choices=("0", "1", "2", "all"))
+    parser.add_argument("--band", default="0", choices=("0", "1", "2", "all"))
+    parser.add_argument("--antenna", choices=("2.4G", "5G", "6G"), help="required with --band all")
     parser.add_argument("--freq", type=float, default=2442e6)
     parser.add_argument("--rate", type=float, default=40e6, choices=(40e6, 80e6, 160e6, 320e6))
     parser.add_argument("--bandwidth", type=float, default=40e6)
     parser.add_argument("--seconds", type=float, default=1.0)
     parser.add_argument("--cmd", default="w1700k", help="path to the host w1700k command")
     parser.add_argument("--module", default=os.environ.get("W1700K_SOAPY_MODULE"),
-                        help="path to libw1700kSupport.so (default: $W1700K_SOAPY_MODULE or next to this example)")
+                        help="path to libw1700kSupport.so (default: $W1700K_SOAPY_MODULE or build/bin in the tree)")
     args = parser.parse_args()
+    if args.band == "all" and not args.antenna:
+        parser.error("--band all requires --antenna")
+    if args.band != "all" and args.antenna and args.antenna != ("2.4G", "5G", "6G")[int(args.band)]:
+        parser.error("--antenna must match --band")
 
     module = args.module
     if not module:
-        here = Path(__file__).resolve().parent.parent
-        for candidate in (here / "bin" / "libw1700kSupport.so",
-                          here / "build" / "libw1700kSupport.so"):
+        roots = Path(__file__).resolve().parents[1:3]
+        for candidate in (root / folder / "libw1700kSupport.so" for root in roots for folder in ("build", "bin")):
             if candidate.is_file():
                 module = str(candidate)
                 break
@@ -51,19 +55,31 @@ def main():
     device_args["band"] = args.band
     device_args["cmd"] = args.cmd
     device = SoapySDR.Device(device_args)
-    device.setSampleRate(SOAPY_SDR_RX, 0, args.rate)
-    device.setFrequency(SOAPY_SDR_RX, 0, args.freq)
-    device.setBandwidth(SOAPY_SDR_RX, 0, args.bandwidth)
-    device.setGainMode(SOAPY_SDR_RX, 0, True)
-
-    stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [0])
-    device.activateStream(stream)
+    stream = None
+    active = False
     total = 0
     overflows = 0
-    started = time.monotonic()
     try:
+        if args.antenna:
+            device.setAntenna(SOAPY_SDR_RX, 0, args.antenna)
+        device.setSampleRate(SOAPY_SDR_RX, 0, args.rate)
+        if not any(r.minimum() <= args.freq <= r.maximum() for r in device.getFrequencyRange(SOAPY_SDR_RX, 0)):
+            raise ValueError("--freq is outside the selected band's tuning range")
+        device.setFrequency(SOAPY_SDR_RX, 0, args.freq)
+        device.setBandwidth(SOAPY_SDR_RX, 0, args.bandwidth)
+        device.setGainMode(SOAPY_SDR_RX, 0, True)
+        print("antenna=%s  frequency=%.6f MHz  rate=%.0f Msps" %
+              (device.getAntenna(SOAPY_SDR_RX, 0), device.getFrequency(SOAPY_SDR_RX, 0) / 1e6,
+               device.getSampleRate(SOAPY_SDR_RX, 0) / 1e6), flush=True)
+
+        stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, [0])
+        result = device.activateStream(stream)
+        if result != 0:
+            raise RuntimeError("activateStream: %d" % result)
+        active = True
+        buffer = np.empty(2 * 65536, dtype=np.int16)
+        started = time.monotonic()
         while time.monotonic() - started < args.seconds:
-            buffer = np.empty(2 * 65536, dtype=np.int16)
             result = device.readStream(stream, [buffer], 65536, timeoutUs=1000000)
             if result.ret > 0:
                 total += result.ret
@@ -73,12 +89,14 @@ def main():
                 continue
             else:
                 raise RuntimeError("readStream: %d" % result.ret)
+        elapsed = time.monotonic() - started
     finally:
-        device.deactivateStream(stream)
-        device.closeStream(stream)
+        if active:
+            device.deactivateStream(stream)
+        if stream is not None:
+            device.closeStream(stream)
         device.close()
 
-    elapsed = time.monotonic() - started
     print("samples=%d  %.2f Msps  overflows=%d" % (total, total / elapsed / 1e6, overflows))
 
 

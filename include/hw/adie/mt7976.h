@@ -96,8 +96,8 @@
  *     4..7, 17        peaks of +7..+29 dB at 80..120 MHz, clipping
  * The MT7977's own 320 MHz code on band 1, for comparison: +0.6 / -2.2 /
  * -6.8 / -14.1 / -19.3 at 80 / 100 / 120 / 140 / 150 MHz, alias -40.7.
- * [22:20] = 2 with the trim 9 codes under the calibrated one (8 on unit A) is
- * the widest setting without peaking: MT7976_RXF_WIDE_*. [0] .. [15] and
+ * [22:20] = 2 with trim 8 (17 minus 9 on unit A) was the widest measured
+ * setting without peaking on that unit: MT7976_RXF_WIDE_*. [0] .. [15] and
  * [17..19], [23..26], [28..31] single flips: no visible effect; [16] clear
  * -4 dB at 130 MHz; [27] set mutes. [measured] */
 #define MT7976_RXF_125                  0x125u
@@ -106,8 +106,13 @@
 #define MT7976_RXF_125_EXT_WIDE         2u
 #define MT7976_RXF_125_MUTE             HW_BIT(27)
 /* The 320 MHz-class filter: code 3, [22:20] = 2, RC trim lowered from the
- * calibrated code by this many steps (clamped at 0). [measured] */
+ * calibrated code by 9, with a floor of 8. On a second unit calibrated at
+ * 14, trim 5 produced strong peaks near LO +/-151 MHz; trim 7 still peaked,
+ * while trim 8 removed them, including at LO 2407 / 2477 MHz (2026-10-30).
+ * This empirical floor is not a stability guarantee across boards. Native
+ * filters through 160 MHz retain the calibrated trim. */
 #define MT7976_RXF_WIDE_TRIM_DROP       9u
+#define MT7976_RXF_WIDE_TRIM_MIN        8u
 
 /* 0x12f  Chain word (k 0..3); RF_INIT writes it on k 4 only (0xffc04622).
  * Chain 0 at power-on 0xff2a5324. [27]: spectrum mirror (rfmodes.h

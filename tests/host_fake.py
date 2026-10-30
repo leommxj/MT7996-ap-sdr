@@ -386,7 +386,9 @@ class FakeDevice:
             self.lo[band] = lo = radio.actual_lo(band, hz)
             ops, outs = 33 if band == 0 else 100, [self.sx_status[band], 0x40, 0, 0x10000, 0]
             res = rf.RF_UNLOCKED if self.sx_status[band] & 3 else CTL_OK
-        elif command == rf.RF_GAIN:
+        elif command in (rf.RF_GAIN, rf.RF_GAIN_APPLY):
+            if command == rf.RF_GAIN_APPLY and self.streaming:
+                return CTL_TIMEOUT, CTL_TIMEOUT
             if b == rf.RF_GAIN_AGC:
                 word = 0
             elif b <= 4 and c <= 9:

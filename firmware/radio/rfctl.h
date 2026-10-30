@@ -6,9 +6,9 @@
  * Each builder writes raw control ops ({op, a, b, c} as posted to the CTL mailbox, an A-die
  * register as MT7996_PROBE_CTL_AREG(die, k, index)) into the caller's buffer: op for op the
  * program host/w1700k/rf.py built on the host before (mt7977_retune / mt7976_retune, set_gain,
- * set_filter, set_trim, status, synth_locks, select_band_program), except for the one change under
- * rfctl_tune. The control interpreter (stream/ctl.h) runs the program inside the RF op exactly as
- * it runs a posted one: DELAY, an unmet APOLL and the SAR's settling return and resume on its next
+ * set_filter, set_trim, status, synth_locks, select_band_program), with the tune change and
+ * GAIN_APPLY addition described below. The control interpreter (stream/ctl.h) runs the program
+ * inside the RF op exactly as it runs a posted one: DELAY, an unmet APOLL and the SAR's settling return and resume on its next
  * call, so a retune costs a running stream only the time its register accesses take. Nothing here
  * touches hardware or keeps state between builds (rfctl_build's buffer aside).
  *
@@ -36,6 +36,8 @@
  * rfctl_gain(band, lna, lpf)  Every chain's RXGAIN forced to (lna 0..4, lpf 0..9) in sets A
  *     and B (phy.h MT7996_PHY_RXGAIN_FORCE_AB), or handed to the AGC with lna = RFCTL_GAIN_AGC;
  *     then every chain's word read back.
+ *     GAIN_APPLY adds an RX-disable pulse and 20 ms settling while ICAP0 is
+ *     stopped. GAIN remains available for timing experiments with raw writes.
  * rfctl_filter(band, mhz)  Every chain's analog filter to mhz (20, 40, 80, 160, 320) at whatever
  *     bandwidth the channel has: rfctl_filter_regs' ADIE_RX_BW and ADIE_CHSET_933, on the MT7976
  *     also MT7976_RXF_125 [22:20] and the RC trim; then every chain's ADIE_RX_BW_RB read (on band
@@ -65,6 +67,7 @@ struct rfctl_op {
  * ops. */
 #define RFCTL_MAX_OPS		112u
 #define RFCTL_GAIN_AGC		MT7996_PROBE_CTL_RF_GAIN_AGC
+#define RFCTL_GAIN_SETTLE_US	20000u
 #define RFCTL_UNLOCKED		MT7996_PROBE_CTL_RF_UNLOCKED
 /* Units of the arguments. */
 #define RFCTL_HZ_PER_KHZ	1000u

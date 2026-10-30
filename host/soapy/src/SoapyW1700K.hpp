@@ -127,6 +127,9 @@ private:
     // Runs a `w1700k` command; a failure is logged, not thrown (see "Errors" above). Returns
     // whether it succeeded.
     bool change(const std::vector<std::string> &args);
+    void change_gain(const std::vector<std::string> &args);
+    void discard_stream();
+    std::unique_lock<std::mutex> pause_reads();
 
     // The band this device is about: the one it is fixed to, else the unit's active band.
     int band() const;
@@ -174,6 +177,7 @@ private:
 
     RxStream rx_stream_;
     std::mutex read_mutex_;                // held by readStream, and by whatever changes ring_ or the position
+    std::atomic<unsigned> settings_waiting_{0};
     std::mutex ring_mutex_;                // held while ring_ changes and while the control words are written
     w1700k_stream_header *ring_ = nullptr; // the service's shared memory; changes with both mutexes held
     size_t ring_bytes_ = 0;
@@ -185,4 +189,7 @@ private:
     uint64_t run_ = 0;                     // the stream (run) being read
     uint64_t next_slice_ = 0;              // the next slice of that run
     uint64_t slice_offset_ = 0;            // samples of that slice already delivered
+    uint64_t restart_run_ = 0;
+    bool waiting_restart_ = false;         // discard queued samples until the service starts a new run
+    bool overflow_pending_ = false;
 };

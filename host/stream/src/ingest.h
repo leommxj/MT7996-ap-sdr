@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -97,6 +98,7 @@ private:
     std::vector<std::unique_ptr<Worker>> workers_;
 
     // The run: its first sequence number, and the newest slot filled.
+    mutable std::shared_mutex run_mutex_;
     std::atomic<uint64_t> run_{0}, base_{0}, newest_{0};
     std::atomic<uint64_t> started_ns_{0}, last_ns_{0};
     std::atomic<bool> new_run_{false};
