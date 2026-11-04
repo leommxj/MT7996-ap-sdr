@@ -23,17 +23,15 @@ void StreamClient::refresh()
         // The same object while it is live; a stopped service's object is replaced once a new one
         // exists under the name.
         if (w1700k_stream_alive(current->header())) return;
-        struct stat st;
-        const int fd = shm_open(name_.c_str(), O_RDONLY, 0);
-        if (fd < 0) return;
-        const bool same = fstat(fd, &st) == 0 && uint64_t(st.st_ino) == current->inode();
-        close(fd);
-        if (same) return;
     }
     size_t bytes = 0;
     uint64_t inode = 0;
     w1700k_stream_header *h = w1700k_stream_open(name_.c_str(), 1, &bytes, &inode);
     if (!h) return;
+    if (current && inode == current->inode()) {
+        munmap(h, bytes);
+        return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     view_ = std::make_shared<const StreamView>(h, bytes, inode, ++epoch_);
     write_control(h);

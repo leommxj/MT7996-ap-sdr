@@ -511,12 +511,19 @@ class SpectrumServerTest(unittest.TestCase):
         self.assertEqual(ws.status["stream"]["bad"], 0)
 
         # SIGUSR1: a snapshot labelled with the current tuning.
+        # The fake export runs slower than the advertised rate; wait for a full snapshot.
+        shm = stream_shm.Shm(s.stream_name)
+        self.addCleanup(shm.close)
+        snapshot_slices = int(0.01 * 320e6 / SLICE_SAMPLES) + 64
+        ws.wait(lambda: shm.position()[1] >= snapshot_slices, what="enough samples for the snapshot")
         s.process.send_signal(signal.SIGUSR1)
         deadline = time.monotonic() + 10
         while not glob.glob(os.path.join(s.dir, "w1700k-dump-*.json")) and time.monotonic() < deadline:
             time.sleep(0.1)
         time.sleep(0.2)
-        [meta_path] = glob.glob(os.path.join(s.dir, "w1700k-dump-*.json"))
+        meta_paths = glob.glob(os.path.join(s.dir, "w1700k-dump-*.json"))
+        self.assertEqual(len(meta_paths), 1, "\n".join(s.stderr))
+        [meta_path] = meta_paths
         with open(meta_path) as f:
             meta = json.load(f)
         self.assertEqual((meta["center_hz"], meta["sample_rate"]), (5175e6, 320e6))
@@ -562,6 +569,18 @@ class SpectrumServerTest(unittest.TestCase):
         ws.send({"t": "set", "lo": 2450e6})
         ws.send({"t": "run", "on": False})
         ws.wait(lambda: sum("--no-controller" in n["text"] for n in ws.notices) == 2, what="two refusals")
+
+    def test_service_restart_reopens_shared_memory(self):
+        s = ServerFixture(self, controller=False, extra=["--center", "2440", "--rate", "40"],
+                          passive_tuning={"center_hz": 2440e6, "sample_rate": 40e6, "running": True})
+        s.exporter.tone_hz = 2445e6
+        self.assert_tone(s.ws.wait_frame(2440e6, 40e6), 2445e6)
+        s.stop_service()
+        s.ws.wait(lambda: not s.ws.status.get("running"), what="the stopped service")
+        with s.ws.cond:
+            s.ws.frames.clear()
+        s.service = subprocess.Popen(s.service.args, stderr=subprocess.DEVNULL)
+        self.assert_tone(s.ws.wait_frame(2440e6, 40e6), 2445e6)
 
 
 if __name__ == "__main__":

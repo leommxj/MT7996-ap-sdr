@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import unittest
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -37,6 +38,14 @@ class StdinTest(unittest.TestCase):
         kwargs = self.run_with(input=b'script')
         self.assertEqual(kwargs.get('input'), b'script')
         self.assertNotIn('stdin', kwargs)
+
+    def test_macos_control_socket_avoids_long_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(unit.os.environ, {'XDG_RUNTIME_DIR': ''}), \
+                mock.patch.object(unit.sys, 'platform', 'darwin'), \
+                mock.patch.object(unit.Path, 'expanduser', return_value=Path(directory) / 'cache'):
+            target = unit._control_dir()
+            self.assertEqual(target, Path(directory) / 'cache')
+            self.assertTrue(target.is_dir())
 
 
 class Batch(unittest.TestCase):

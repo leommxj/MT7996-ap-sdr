@@ -46,6 +46,8 @@ SharedRing::SharedRing(const std::string &name, unsigned slices) : name_(name)
     const uint64_t tags = W1700K_STREAM_HEADER_BYTES;
     const uint64_t samples = tags + ((uint64_t(slices) * 8 + 4095) & ~uint64_t(4095));
     bytes_ = size_t(samples + uint64_t(slices) * W1700K_STREAM_SLICE * 4);
+    const size_t page = size_t(sysconf(_SC_PAGESIZE));
+    bytes_ = (bytes_ + page - 1) / page * page;
     const int fd = shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
     if (fd < 0) throw std::runtime_error("shm_open " + name + ": " + std::strerror(errno));
     if (ftruncate(fd, off_t(bytes_))) {
@@ -69,6 +71,7 @@ SharedRing::SharedRing(const std::string &name, unsigned slices) : name_(name)
     header_->samples_offset = samples;
     header_->total_bytes = bytes_;
     header_->service_pid = uint64_t(getpid());
+    header_->instance_ns = w1700k_stream_now_ns();
     store(&header_->heartbeat_ns, w1700k_stream_now_ns());
 }
 

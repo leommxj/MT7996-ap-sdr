@@ -30,7 +30,8 @@ Build the firmware first (`make -C firmware`); the host reads `firmware/build/fi
 | `export.dst_mac` | MAC of the local interface holding `dst_ip` | |
 | `export.port`, `export.ports` | `7700`, `8` | UDP destination port; source ports cycle over `ports` |
 
-All ssh traffic shares one ControlMaster connection (socket in `$XDG_RUNTIME_DIR`).
+All ssh traffic shares one ControlMaster connection. The socket lives in `$XDG_RUNTIME_DIR`
+when available, otherwise in `~/.cache/w1700k` on macOS or a per-user temporary directory on Linux.
 
 **Calibration EEPROM.** Each unit carries its own RF calibration, a 16 KiB EEPROM image
 (7680 bytes used) in the factory `calibration` partition at NAND 0x405000. `init/install`

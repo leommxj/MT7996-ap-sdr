@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * The W1700K's IQ stream as every consumer on the host reads it: the shared memory of
- * w1700k-stream (host/stream). One POSIX shared-memory object, by default /dev/shm/w1700k-stream,
+ * w1700k-stream (host/stream). One POSIX shared-memory object named /w1700k-stream,
  * mapped by the service and by each consumer. Native byte order and alignment; every word shared
  * between processes is read and written with the __atomic builtins, from C and C++ alike.
  *
@@ -53,7 +53,8 @@ struct w1700k_stream_header {
 	uint64_t tags_offset, samples_offset, total_bytes;
 	uint64_t service_pid;
 	uint64_t heartbeat_ns;		/* CLOCK_MONOTONIC, refreshed about every 100 ms */
-	uint64_t reserved0[8];
+	uint64_t instance_ns;		/* creation time: Darwin shared memory has no inode */
+	uint64_t reserved0[7];
 
 	/* the published position */
 	uint64_t position_seq;		/* odd while the service writes run and newest */
@@ -140,7 +141,7 @@ static inline int w1700k_stream_alive(const struct w1700k_stream_header *h)
  * Maps the service's shared memory (name NULL: W1700K_STREAM_NAME); `writable` for a consumer that
  * writes the control words. Returns NULL with errno set: ENOENT while no service has created it,
  * EPROTO for another layout. *bytes receives the mapping's length (for munmap), *inode the
- * object's inode (a restarted service creates a new one).
+ * object's identity (creation time, or inode for older services).
  */
 static inline struct w1700k_stream_header *w1700k_stream_open(const char *name, int writable, size_t *bytes,
 							      uint64_t *inode)
@@ -169,7 +170,7 @@ static inline struct w1700k_stream_header *w1700k_stream_open(const char *name, 
 	}
 	*bytes = (size_t)st.st_size;
 	if (inode)
-		*inode = (uint64_t)st.st_ino;
+		*inode = h->instance_ns ? h->instance_ns : (uint64_t)st.st_ino;
 	return h;
 }
 

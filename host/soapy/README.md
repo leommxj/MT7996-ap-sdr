@@ -16,6 +16,9 @@ make soapy
 make -C host/soapy
 ```
 
+On macOS, install dependencies with `brew install fftw soapysdr nlohmann-json` and follow
+[macOS host setup](../../docs/macos.md) for the network and receiver arguments.
+
 Runtime prerequisites are the unit powered and reachable over SSH, `host/stream/build/w1700k-stream`
 running, and `host/bin/w1700k` on `PATH` or passed as `cmd=`.
 

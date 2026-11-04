@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "ingest.h"
+#include "w1700k_posix.h"
+#include "w1700k_stream.h"
 
-#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -24,12 +25,6 @@ constexpr size_t kMinSliceBytes = 4096;          // shorter completions are firm
 constexpr uint64_t kRunGapNs = 1000000000;       // silence that ends a run
 constexpr uint64_t kRunJumpBack = 1 << 20;       // slices back: a new run (the driver was reloaded)
 constexpr uint64_t kRunJumpForward = uint64_t(1) << 39;  // keeps slot indices below the tag's run field
-
-uint64_t now_ns()
-{
-    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count());
-}
 
 void atomic_max(std::atomic<uint64_t> &a, uint64_t v)
 {
@@ -93,11 +88,16 @@ struct Ingest::Worker {
         duplicates{0}, drops{0}, before{0}, spare{0}, stale{0}, stale_lines{0};
 };
 
-Ingest::Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads)
-    : ring_(ring), bind_ip_(bind_ip), port_(port), threads_(threads)
+Ingest::Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads,
+              const std::string &source_ip)
+    : ring_(ring), bind_ip_(bind_ip), source_ip_(source_ip), port_(port), threads_(threads)
 {
     in_addr check;
     if (inet_pton(AF_INET, bind_ip.c_str(), &check) != 1) throw std::runtime_error("not an IPv4 address: " + bind_ip);
+    if (!source_ip.empty() && inet_pton(AF_INET, source_ip.c_str(), &check) != 1)
+        throw std::runtime_error("not an IPv4 address: " + source_ip);
+    if (!source_ip.empty() && port + threads > 65536)
+        throw std::runtime_error("source ports exceed 65535");
 }
 
 // Binds the sockets and starts receiving: not before, or the kernel would queue (and then
@@ -111,17 +111,44 @@ void Ingest::start()
     inet_pton(AF_INET, bind_ip_.c_str(), &address.sin_addr);
     for (unsigned i = 0; i < threads_; ++i) {
         auto w = std::make_unique<Worker>();
-        int one = 1, rcvbuf = 48 << 20;
+#ifdef __APPLE__
+        // Darwin's SO_REUSEPORT does not distribute unicast like Linux. Share one socket.
+        if (source_ip_.empty() && i) {
+            w->fd = w1700k_cloexec(dup(workers_.front()->fd));
+            if (w->fd < 0) throw std::runtime_error(std::string("dup UDP socket: ") + std::strerror(errno));
+            workers_.push_back(std::move(w));
+            continue;
+        }
+#endif
+        int one = 1;
+#ifdef __APPLE__
+        int rcvbuf = 8 << 20;
+#else
+        int rcvbuf = 48 << 20;
+#endif
         timeval tick{0, 100000};
-        w->fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);  // not inherited by the controller
+        w->fd = w1700k_socket(AF_INET, SOCK_DGRAM, 0);
         if (w->fd < 0 || setsockopt(w->fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) ||
             setsockopt(w->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) ||
+#ifndef __APPLE__
             setsockopt(w->fd, SOL_SOCKET, SO_RXQ_OVFL, &one, sizeof(one)) ||
+#endif
             setsockopt(w->fd, SOL_SOCKET, SO_RCVTIMEO, &tick, sizeof(tick)) ||
             bind(w->fd, reinterpret_cast<sockaddr *>(&address), sizeof(address))) {
             std::string why = std::strerror(errno);
             if (w->fd >= 0) close(w->fd);
             throw std::runtime_error("UDP " + bind_ip_ + ":" + std::to_string(port_) + ": " + why);
+        }
+        if (!source_ip_.empty()) {
+            sockaddr_in source{};
+            source.sin_family = AF_INET;
+            source.sin_port = htons(uint16_t(port_ + i));
+            inet_pton(AF_INET, source_ip_.c_str(), &source.sin_addr);
+            if (connect(w->fd, reinterpret_cast<sockaddr *>(&source), sizeof(source))) {
+                const std::string why = std::strerror(errno);
+                close(w->fd);
+                throw std::runtime_error("UDP source " + source_ip_ + ": " + why);
+            }
         }
         workers_.push_back(std::move(w));
     }
@@ -139,6 +166,18 @@ Ingest::~Ingest()
 
 void Ingest::work(Worker &w)
 {
+#ifdef __APPLE__
+    while (!stopping_.load(std::memory_order_relaxed)) {
+        const ssize_t n = recvfrom(w.fd, w.buffers.data(), kDatagram, 0, nullptr, nullptr);
+        if (n < 0) continue;
+        if (n == ssize_t(kDatagram)) {
+            w.bad.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        const uint64_t t = w1700k_stream_now_ns(), previous = last_ns_.exchange(t, std::memory_order_acq_rel);
+        take(w, w.buffers.data(), size_t(n), previous && int64_t(t - previous) > int64_t(kRunGapNs), t);
+    }
+#else
     mmsghdr msgs[kBatch];
     iovec iov[kBatch];
     char control[kBatch][CMSG_SPACE(sizeof(uint32_t))];
@@ -155,7 +194,7 @@ void Ingest::work(Worker &w)
         if (n <= 0) continue;
         // A second of silence ends the run: the next slice starts another. Signed: another
         // thread may have stamped a later time between our clock read and the exchange.
-        uint64_t t = now_ns(), previous = last_ns_.exchange(t, std::memory_order_acq_rel);
+        uint64_t t = w1700k_stream_now_ns(), previous = last_ns_.exchange(t, std::memory_order_acq_rel);
         bool fresh = previous && int64_t(t - previous) > int64_t(kRunGapNs);
         for (int k = 0; k < n; ++k) {
             take(w, &w.buffers[k * kDatagram], msgs[k].msg_len, fresh && k == 0, t);
@@ -167,6 +206,7 @@ void Ingest::work(Worker &w)
                 }
         }
     }
+#endif
 }
 
 // Firmware events are filed as event slots rather than dropped: the scheduler steps over them

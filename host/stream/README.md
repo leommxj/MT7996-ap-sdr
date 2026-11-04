@@ -21,17 +21,32 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 |---|---|---|
 | `--bind IP` | `10.77.0.10` | the stream's destination address on this host (the 10G link) |
 | `--port N` | `7700` | its UDP port |
-| `--rx-threads N` | 8 | UDP sockets and receive threads (`SO_REUSEPORT`; the unit spreads its source ports) |
+| `--source IP` | unset | accept this device only; each thread receives source port `--port + thread index` |
+| `--rx-threads N` | Linux: 8; macOS: 1 | UDP receive threads; with `--source`, match the unit's `export.ports` |
 | `--workers N` | 6 | threads that unpack and correct |
 | `--ring-mib N` | 512 | the shared ring, a power of two (512 MiB holds 0.42 s at 320 Msps) |
-| `--name NAME` | `/w1700k-stream` | the shared-memory object (`/dev/shm/w1700k-stream`) |
+| `--name NAME` | `/w1700k-stream` | the POSIX shared-memory object (a file under `/dev/shm` on Linux) |
 | `--report S` | 0 | a JSON status line on stdout every S seconds |
 
-The host needs the destination address on the 10G link, an MTU of at least 8236, and room for
+The host needs the destination address on the 10G link and an MTU of at least 8236 (9216 recommended).
+On Linux, allow room for
 48 MiB socket buffers (`sysctl -w net.core.rmem_max=67108864`, or the kernel caps them silently
 and drops datagrams under load: counted as `socket_drops`). One service owns the port: a second
 receiver of the same port would take half the datagrams, so consumers read the ring instead. A
 second service under the same name refuses to start; at exit the object is unlinked.
+
+On macOS, install FFTW with `brew install fftw`. Homebrew's include and library directories
+are detected during the build. Darwin does not distribute unicast UDP over `SO_REUSEPORT`
+like Linux. For the default eight source ports, use:
+
+```sh
+build/w1700k-stream --bind 10.77.0.11 --source 10.77.0.1 --rx-threads 8
+```
+
+Each socket then has its own source IP/port and receive buffer (8 MiB requested on macOS).
+Without `--source`, macOS uses one shared socket; this can lose data at high sample rates.
+Darwin has no `SO_RXQ_OVFL`, so `socket_drops` is unavailable and stays zero; use sequence
+losses (`lost`) and `netstat -s -p udp` to assess loss. See [macOS setup](../../docs/macos.md).
 
 ## The stream
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Command.hpp"
+#include "w1700k_posix.h"
 
 #include <nlohmann/json.hpp>
 
@@ -62,8 +63,8 @@ int run_process(const std::vector<std::string> &argv, std::chrono::seconds timeo
     out.clear();
     err.clear();
     int out_pipe[2], err_pipe[2];
-    if (pipe2(out_pipe, O_CLOEXEC)) return -1;
-    if (pipe2(err_pipe, O_CLOEXEC)) {
+    if (w1700k_pipe(out_pipe)) return -1;
+    if (w1700k_pipe(err_pipe)) {
         close(out_pipe[0]);
         close(out_pipe[1]);
         return -1;
@@ -76,7 +77,11 @@ int run_process(const std::vector<std::string> &argv, std::chrono::seconds timeo
     // (ssh) along with it.
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
-    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+    short spawn_flags = POSIX_SPAWN_SETPGROUP;
+#ifdef __APPLE__
+    spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+    posix_spawnattr_setflags(&attributes, spawn_flags);
     posix_spawnattr_setpgroup(&attributes, 0);
 
     posix_spawn_file_actions_t actions;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "child.h"
+#include "w1700k_posix.h"
 
 #include <cerrno>
 #include <chrono>
@@ -33,8 +34,8 @@ std::string describe(int status)
 ChildProcess::ChildProcess(const std::string &command, std::function<void()> wake) : wake_(std::move(wake))
 {
     int in[2], out[2];
-    if (pipe2(in, O_CLOEXEC)) throw std::runtime_error(std::string("pipe: ") + std::strerror(errno));
-    if (pipe2(out, O_CLOEXEC)) {
+    if (w1700k_pipe(in)) throw std::runtime_error(std::string("pipe: ") + std::strerror(errno));
+    if (w1700k_pipe(out)) {
         int e = errno;
         close(in[0]);
         close(in[1]);

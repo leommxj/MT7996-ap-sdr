@@ -76,7 +76,7 @@ double wall_ms()
     return std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-double steady_s() { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); }
+double steady_s() { return w1700k_stream_now_ns() / 1e9; }
 
 // A whole number in [low, high] from a client message.
 int integer_field(const JsonValue &m, const char *key, int low, int high)

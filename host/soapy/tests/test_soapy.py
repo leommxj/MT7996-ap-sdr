@@ -74,7 +74,7 @@ def build_problem():
     for tool in ("make", os.environ.get("CXX", "c++")):
         if not shutil.which(tool):
             return "no " + tool
-    probe = subprocess.run([os.environ.get("CXX", "c++"), "-x", "c++", "-fsyntax-only", "-"],
+    probe = subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-x", "c++", "-fsyntax-only", "-"],
                            input="#include <SoapySDR/Device.hpp>\n#include <nlohmann/json.hpp>\n", text=True,
                            capture_output=True)
     if probe.returncode:

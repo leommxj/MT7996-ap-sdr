@@ -17,6 +17,11 @@
 namespace {
 
 constexpr unsigned kReceiveSlices = 32768;  // the reorder ring: 256 MiB, 0.2 s at 320 Msps
+#ifdef __APPLE__
+constexpr unsigned kReceiveThreads = 1;
+#else
+constexpr unsigned kReceiveThreads = 8;
+#endif
 
 std::atomic<bool> stop_requested{false};
 void on_signal(int) { stop_requested = true; }
@@ -27,11 +32,12 @@ void usage()
                  "usage: w1700k-stream [options]\n"
                  "  --bind IP         the stream's destination address on this host (default 10.77.0.10)\n"
                  "  --port N          its UDP port (default 7700)\n"
-                 "  --rx-threads N    UDP sockets and receive threads (default 8)\n"
+                 "  --source IP       receive from this device only, one source port per RX thread\n"
+                 "  --rx-threads N    UDP receive threads (default %u)\n"
                  "  --workers N       unpacking and correction threads (default 6)\n"
                  "  --ring-mib N      the shared sample ring, a power of two (default 512: 0.42 s at 320 Msps)\n"
                  "  --name NAME       the shared-memory object (default /w1700k-stream)\n"
-                 "  --report S        a JSON status line every S seconds (default 0: none)\n");
+                 "  --report S        a JSON status line every S seconds (default 0: none)\n", kReceiveThreads);
 }
 
 unsigned positive(const std::string &option, const std::string &text, unsigned long max)
@@ -52,8 +58,8 @@ unsigned positive(const std::string &option, const std::string &text, unsigned l
 
 int main(int argc, char **argv)
 {
-    std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME;
-    unsigned port = 7700, rx_threads = 8, workers = 6, ring_mib = 512, report = 0;
+    std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME, source;
+    unsigned port = 7700, rx_threads = kReceiveThreads, workers = 6, ring_mib = 512, report = 0;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -62,6 +68,7 @@ int main(int argc, char **argv)
                 return argv[++i];
             };
             if (arg == "--bind") bind = value();
+            else if (arg == "--source") source = value();
             else if (arg == "--port") port = positive(arg, value(), 65535);
             else if (arg == "--rx-threads") rx_threads = positive(arg, value(), 64);
             else if (arg == "--workers") workers = positive(arg, value(), 64);
@@ -87,7 +94,7 @@ int main(int argc, char **argv)
     try {
         SharedRing shared(name, ring_mib * 128);
         SampleRing received(kReceiveSlices);
-        Ingest ingest(received, bind, port, rx_threads);
+        Ingest ingest(received, bind, port, rx_threads, source);
         Publisher publisher(received, ingest, shared.header(), workers);
         publisher.start();
         ingest.start();

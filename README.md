@@ -2,7 +2,7 @@
 
 Turns a Gemtek W1700K Wi-Fi 7 router into a wideband software-defined receiver.
 The router's MediaTek MT7996 radio captures raw 14-bit IQ at up to 320 Msps,
-its Airoha AN7581 SoC streams it over 10 GbE, and a Linux host shows it as a
+its Airoha AN7581 SoC streams it over 10 GbE, and a Linux or macOS host shows it as a
 live spectrum and waterfall in the browser, with the receiver's controls next
 to it.
 
@@ -64,6 +64,9 @@ between them, in 1.22 kHz bins.*
 | [`docs/`](docs/) | [Architecture](docs/architecture.md), [roadmap](docs/roadmap.md) |
 
 ## Getting started
+
+For an already installed unit, [macOS host setup](docs/macos.md) covers building the receiver,
+spectrum server and SoapySDR module. Router images and installation tools are built on Linux.
 
 You need a W1700K (HW 1.x) or W1700K2 (HW 2.1), a 3.3 V USB serial adapter on
 its console header, an Ethernet cable to its `lan3` port for installation, and

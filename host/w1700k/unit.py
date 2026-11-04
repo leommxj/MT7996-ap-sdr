@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: MIT
 """The unit over ssh: one multiplexed connection, commands, file pushes and batched client runs.
 
-All ssh invocations share one ControlMaster connection (socket under $XDG_RUNTIME_DIR), so a
-command costs a round trip, not a handshake. The unit side is busybox sh plus the w1700k
-clients in `bin_dir`.
+All ssh invocations share one ControlMaster connection, so a command costs a round trip,
+not a handshake. The unit side is busybox sh plus the w1700k clients in `bin_dir`.
 """
 import io
 import os
 import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -40,8 +40,11 @@ def _control_dir():
     base = os.environ.get('XDG_RUNTIME_DIR')
     if base and Path(base).is_dir():
         return Path(base)
-    path = Path(tempfile.gettempdir()) / f'w1700k-{os.getuid()}'
-    path.mkdir(mode=0o700, exist_ok=True)
+    if sys.platform == 'darwin':
+        path = Path('~/.cache/w1700k').expanduser()
+    else:
+        path = Path(tempfile.gettempdir()) / f'w1700k-{os.getuid()}'
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return path
 
 

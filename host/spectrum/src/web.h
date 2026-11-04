@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // A small HTTP/1.1 and WebSocket server (RFC 6455, with permessage-deflate,
-// RFC 7692) on one epoll thread: static files, and WebSocket clients at /ws.
+// RFC 7692) on one event loop: static files, and WebSocket clients at /ws.
 #pragma once
 
 #include <atomic>
@@ -73,7 +73,7 @@ private:
     std::string web_dir_;
     std::vector<std::unique_ptr<Asset>> assets_;
     std::string address_;
-    int listener_ = -1, epoll_ = -1, event_ = -1;
+    int listener_ = -1, queue_ = -1, event_ = -1;
     unsigned next_id_ = 1;
     std::map<unsigned, std::unique_ptr<Connection>> connections_;
 };

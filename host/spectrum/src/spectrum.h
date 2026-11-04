@@ -94,7 +94,14 @@ public:
 
 private:
     struct Transform;
-    struct Job;
+    struct Job {
+        std::shared_ptr<const StreamView> view;
+        uint64_t sequence = 0, run = 0, first = 0, stride = 0;
+        unsigned blocks = 0;
+        std::shared_ptr<const Transform> transform;
+        Tuning tuning;
+        bool peak = false, remove_dc = false;
+    };
     struct Worker;
     // A tuning and the slot it applies from (ordered by run, then slot index).
     struct Segment {

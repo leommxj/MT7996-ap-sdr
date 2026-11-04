@@ -116,15 +116,6 @@ struct SpectrumEngine::Transform {
     }
 };
 
-struct SpectrumEngine::Job {
-    std::shared_ptr<const StreamView> view;  // the mapping the run lives in
-    uint64_t sequence = 0, run = 0, first = 0, stride = 0;
-    unsigned blocks = 0;
-    std::shared_ptr<const Transform> transform;
-    Tuning tuning;
-    bool peak = false, remove_dc = false;
-};
-
 struct SpectrumEngine::Worker {
     std::thread thread;
     unsigned size = 0;

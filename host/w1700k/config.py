@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
@@ -125,7 +126,20 @@ def load(path=None):
 
 
 def local_mac_for(ip):
-    """The MAC of the local interface holding `ip` (iproute2 JSON), for the export's destination."""
+    """The MAC of the local interface holding `ip`, for the export's destination."""
+    if sys.platform == 'darwin':
+        try:
+            out = subprocess.run(['/sbin/ifconfig', '-a'], capture_output=True, text=True, check=True,
+                                 stdin=subprocess.DEVNULL).stdout
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ConfigError(f'cannot list local addresses ({exc}); set export.dst_mac')
+        for interface in re.split(r'(?m)^(?=[^\s:]+:)', out):
+            if re.search(r'^\s+inet ' + re.escape(ip) + r'(?:\s|$)', interface, re.M):
+                mac = re.search(r'^\s+ether ((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\s*$', interface, re.M)
+                if mac:
+                    return mac.group(1).lower()
+                raise ConfigError(f'no Ethernet MAC on the interface holding {ip}; set export.dst_mac')
+        raise ConfigError(f'no local interface holds {ip}; configure it or set export.dst_mac')
     try:
         out = subprocess.run(['ip', '-j', '-4', 'addr', 'show'], capture_output=True, text=True, check=True,
                              stdin=subprocess.DEVNULL).stdout

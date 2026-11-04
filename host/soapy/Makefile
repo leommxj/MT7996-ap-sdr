@@ -25,7 +25,8 @@ MODNAME := $(notdir $(SEARCH_PATH))
 
 override CXXFLAGS += -std=c++17 -fPIC -I../stream/include -DW1700K_CMD='"$(W1700K_CMD)"' \
 	-DW1700K_MODULE_VERSION='"$(VERSION)"' $(WARNINGS)
-LDLIBS += -lSoapySDR -lrt -pthread
+LDLIBS += -lSoapySDR -pthread
+include ../host.mk
 
 SOURCES := $(wildcard src/*.cpp)
 OBJECTS := $(patsubst src/%.cpp,build/%.o,$(SOURCES))
@@ -36,19 +37,21 @@ all: build/libw1700kSupport.so
 build/libw1700kSupport.so: $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -shared $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-build/%.o: src/%.cpp $(wildcard src/*.hpp) ../stream/include/w1700k_stream.h | build
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+build/%.o: src/%.cpp $(wildcard src/*.hpp ../stream/include/*.h) | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 build:
 	mkdir -p $@
 
 install: all
 	@test -n "$(MODDIR)" || { echo "cannot find SoapySDR's module directory (is SoapySDRUtil installed?): set MODDIR="; exit 1; }
-	install -D -m 755 build/libw1700kSupport.so $(DESTDIR)$(MODDIR)/libw1700kSupport.so
+	install -d $(DESTDIR)$(MODDIR)
+	install -m 755 build/libw1700kSupport.so $(DESTDIR)$(MODDIR)/libw1700kSupport.so
 
 install-user: all
 	@test -n "$(MODNAME)" || { echo "cannot find SoapySDR's module directory name (is SoapySDRUtil installed?)"; exit 1; }
-	install -D -m 755 build/libw1700kSupport.so $(HOME)/.local/lib/SoapySDR/$(MODNAME)/libw1700kSupport.so
+	install -d $(HOME)/.local/lib/SoapySDR/$(MODNAME)
+	install -m 755 build/libw1700kSupport.so $(HOME)/.local/lib/SoapySDR/$(MODNAME)/libw1700kSupport.so
 
 clean:
 	rm -rf build

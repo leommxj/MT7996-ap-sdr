@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "web.h"
+#include "w1700k_posix.h"
 
 #include <algorithm>
 #include <array>
@@ -15,8 +16,12 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#ifdef __APPLE__
+#include <sys/event.h>
+#else
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -168,7 +173,7 @@ struct WebServer::Connection {
     bool draining = false;         // output done and our side shut: reading until the peer closes
     Clock::time_point drain_until;
     bool dead = false;             // to be removed by reap()
-    bool writable_wait = false;    // registered for EPOLLOUT
+    bool writable_wait = false;    // waiting for socket write readiness
     uint64_t sent = 0;
     Clock::time_point last_input = Clock::now(), last_ping = Clock::now();
 
@@ -215,7 +220,7 @@ WebServer::WebServer(const std::string &listen, const std::string &web_dir, Hand
     if (int error = getaddrinfo(host.c_str(), port.c_str(), &hints, &found))
         throw std::runtime_error("cannot listen on " + listen + ": " + gai_strerror(error));
     for (addrinfo *a = found; a && listener_ < 0; a = a->ai_next) {
-        int fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC, a->ai_protocol);
+        int fd = w1700k_socket(a->ai_family, a->ai_socktype, a->ai_protocol);
         if (fd < 0) continue;
         int yes = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -236,14 +241,23 @@ WebServer::WebServer(const std::string &listen, const std::string &web_dir, Hand
     if (listener_ < 0) throw std::runtime_error("cannot listen on " + listen + ": " + std::strerror(errno));
     set_nonblocking(listener_);
 
-    epoll_ = epoll_create1(EPOLL_CLOEXEC);
+#ifdef __APPLE__
+    queue_ = w1700k_cloexec(kqueue());
+    struct kevent ev[2];
+    EV_SET(&ev[0], listener_, EVFILT_READ, EV_ADD, 0, 0, nullptr);
+    EV_SET(&ev[1], 1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, reinterpret_cast<void *>(~uintptr_t(0)));
+    if (queue_ < 0 || kevent(queue_, ev, 2, nullptr, 0, nullptr) < 0)
+        throw std::runtime_error(std::string("kqueue: ") + std::strerror(errno));
+#else
+    queue_ = epoll_create1(EPOLL_CLOEXEC);
     event_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     epoll_event ev{};
     ev.events = EPOLLIN;
     ev.data.u64 = 0;
-    epoll_ctl(epoll_, EPOLL_CTL_ADD, listener_, &ev);
+    epoll_ctl(queue_, EPOLL_CTL_ADD, listener_, &ev);
     ev.data.u64 = ~0ull;
-    epoll_ctl(epoll_, EPOLL_CTL_ADD, event_, &ev);
+    epoll_ctl(queue_, EPOLL_CTL_ADD, event_, &ev);
+#endif
 }
 
 WebServer::~WebServer()
@@ -251,37 +265,64 @@ WebServer::~WebServer()
     connections_.clear();
     if (listener_ >= 0) ::close(listener_);
     if (event_ >= 0) ::close(event_);
-    if (epoll_ >= 0) ::close(epoll_);
+    if (queue_ >= 0) ::close(queue_);
 }
 
 void WebServer::wake()
 {
+#ifdef __APPLE__
+    struct kevent ev;
+    EV_SET(&ev, 1, EVFILT_USER, 0, NOTE_TRIGGER, 0, reinterpret_cast<void *>(~uintptr_t(0)));
+    kevent(queue_, &ev, 1, nullptr, 0, nullptr);
+#else
     uint64_t one = 1;
     if (write(event_, &one, sizeof(one)) < 0) {
         // The counter is saturated only if nobody reads it; nothing to do.
     }
+#endif
 }
 
 void WebServer::run(const std::atomic<bool> &stop)
 {
+#ifdef __APPLE__
+    struct kevent events[64];
+#else
     epoll_event events[64];
+#endif
     auto last_tick = Clock::now();
     while (!stop) {
-        int n = epoll_wait(epoll_, events, 64, 20);
-        if (n < 0 && errno != EINTR) throw std::runtime_error("epoll failed");
+#ifdef __APPLE__
+        const timespec timeout{0, 20000000};
+        int n = kevent(queue_, nullptr, 0, events, 64, &timeout);
+#else
+        int n = epoll_wait(queue_, events, 64, 20);
+#endif
+        if (n < 0 && errno != EINTR) throw std::runtime_error("waiting for socket events failed");
         for (int i = 0; i < n; ++i) {
+#ifdef __APPLE__
+            uint64_t key = reinterpret_cast<uintptr_t>(events[i].udata);
+            const bool readable = events[i].filter == EVFILT_READ;
+            const bool writable = events[i].filter == EVFILT_WRITE;
+            const bool failed = (events[i].flags & EV_ERROR) || (writable && (events[i].flags & EV_EOF));
+#else
             uint64_t key = events[i].data.u64;
+            const bool readable = events[i].events & EPOLLIN;
+            const bool writable = events[i].events & EPOLLOUT;
+            const bool failed = events[i].events & (EPOLLERR | EPOLLHUP);
+#endif
             if (key == 0) {
                 accept_clients();
             } else if (key == ~0ull) {
+#ifndef __APPLE__
                 uint64_t count;
                 while (read(event_, &count, sizeof(count)) > 0) {
                 }
+#endif
                 if (handler_.wake) handler_.wake();
             } else if (Connection *c = find(unsigned(key))) {
-                if (events[i].events & (EPOLLERR | EPOLLHUP)) c->dead = true;
-                if (!c->dead && (events[i].events & EPOLLIN)) receive(*c);
-                if (!c->dead && (events[i].events & EPOLLOUT)) flush(*c);
+                if (failed) c->dead = true;
+                if (!c->dead && readable) receive(*c);
+                if (!c->dead && writable) flush(*c);
             }
         }
         reap();
@@ -315,9 +356,17 @@ void WebServer::accept_clients()
     for (;;) {
         sockaddr_storage address{};
         socklen_t length = sizeof(address);
+#ifdef __APPLE__
+        int fd = w1700k_cloexec(accept(listener_, reinterpret_cast<sockaddr *>(&address), &length));
+        if (fd >= 0) set_nonblocking(fd);
+#else
         int fd = accept4(listener_, reinterpret_cast<sockaddr *>(&address), &length, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#endif
         if (fd < 0) return;
         int yes = 1;
+#ifdef __APPLE__
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
+#endif
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
         // A small send buffer keeps frames queued here, where they can still
         // be merged, rather than in the kernel on a slow link.
@@ -330,10 +379,20 @@ void WebServer::accept_clients()
         if (getnameinfo(reinterpret_cast<sockaddr *>(&address), length, name, sizeof(name), nullptr, 0,
                         NI_NUMERICHOST) == 0)
             c->peer = name;
+#ifdef __APPLE__
+        struct kevent ev[2];
+        EV_SET(&ev[0], fd, EVFILT_READ, EV_ADD, 0, 0, reinterpret_cast<void *>(uintptr_t(c->id)));
+        EV_SET(&ev[1], fd, EVFILT_WRITE, EV_ADD | EV_DISABLE, 0, 0, reinterpret_cast<void *>(uintptr_t(c->id)));
+        if (kevent(queue_, ev, 2, nullptr, 0, nullptr) < 0) {
+            ::close(fd);
+            continue;
+        }
+#else
         epoll_event ev{};
         ev.events = EPOLLIN | EPOLLRDHUP;
         ev.data.u64 = c->id;
-        epoll_ctl(epoll_, EPOLL_CTL_ADD, fd, &ev);
+        epoll_ctl(queue_, EPOLL_CTL_ADD, fd, &ev);
+#endif
         connections_[c->id] = std::move(c);
     }
 }
@@ -365,7 +424,11 @@ void WebServer::receive(Connection &c)
 void WebServer::flush(Connection &c)
 {
     while (c.pending()) {
+#ifdef __APPLE__
+        ssize_t n = send(c.fd, c.output.data() + c.output_at, c.pending(), 0);
+#else
         ssize_t n = send(c.fd, c.output.data() + c.output_at, c.pending(), MSG_NOSIGNAL);
+#endif
         if (n > 0) {
             c.output_at += size_t(n);
             c.sent += uint64_t(n);
@@ -394,10 +457,17 @@ void WebServer::flush(Connection &c)
     bool want = c.pending() != 0;
     if (want != c.writable_wait) {
         c.writable_wait = want;
+#ifdef __APPLE__
+        struct kevent ev;
+        EV_SET(&ev, c.fd, EVFILT_WRITE, want ? EV_ENABLE : EV_DISABLE, 0, 0,
+               reinterpret_cast<void *>(uintptr_t(c.id)));
+        kevent(queue_, &ev, 1, nullptr, 0, nullptr);
+#else
         epoll_event ev{};
         ev.events = EPOLLIN | EPOLLRDHUP | (want ? uint32_t(EPOLLOUT) : 0u);
         ev.data.u64 = c.id;
-        epoll_ctl(epoll_, EPOLL_CTL_MOD, c.fd, &ev);
+        epoll_ctl(queue_, EPOLL_CTL_MOD, c.fd, &ev);
+#endif
     }
 }
 
@@ -409,7 +479,9 @@ void WebServer::reap()
             ++it;
             continue;
         }
-        epoll_ctl(epoll_, EPOLL_CTL_DEL, it->second->fd, nullptr);
+#ifndef __APPLE__
+        epoll_ctl(queue_, EPOLL_CTL_DEL, it->second->fd, nullptr);
+#endif
         ::close(it->second->fd);
         if (it->second->websocket) closed.push_back(it->first);
         it = connections_.erase(it);

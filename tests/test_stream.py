@@ -112,7 +112,9 @@ class StreamServiceTest(unittest.TestCase):
                 break
             except (OSError, AssertionError):
                 if time.monotonic() > deadline or self.proc.poll() is not None:
-                    raise AssertionError("w1700k-stream did not start: " + self.proc.stderr.read().decode())
+                    self.proc.terminate()
+                    _, err = self.proc.communicate(timeout=10)
+                    raise AssertionError("w1700k-stream did not start: " + err.decode())
                 time.sleep(0.05)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         time.sleep(0.2)
@@ -123,7 +125,7 @@ class StreamServiceTest(unittest.TestCase):
         self.proc.send_signal(signal.SIGINT)
         self.assertEqual(self.proc.wait(10), 0)
         self.proc.stderr.close()
-        self.assertFalse(os.path.exists("/dev/shm" + self.name), "the object is unlinked at exit")
+        self.assertFalse(stream_shm.exists(self.name), "the object is unlinked at exit")
 
     def send(self, seq, payload):
         self.sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
@@ -237,10 +239,49 @@ class StreamServiceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             binary = os.path.join(tmp, "ingest-restart")
             subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-O2", "-pthread",
+                            "-I" + os.path.join(STREAM, "include"),
                             "-I" + os.path.join(STREAM, "src"), os.path.join(ROOT, "tests", "ingest_restart.cpp"),
                             os.path.join(STREAM, "src", "ingest.cpp"), "-o", binary], check=True, capture_output=True)
             result = subprocess.run([binary, str(free_udp_port())], capture_output=True, text=True, timeout=35)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_source_ports_have_independent_receivers(self):
+        self.shm.close()
+        self.proc.send_signal(signal.SIGINT)
+        self.proc.wait(10)
+        self.proc.stderr.close()
+        senders = []
+        try:
+            for port in range(self.port, self.port + 4):
+                sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sender.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                sender.bind(("127.0.0.1", port))
+                senders.append(sender)
+            self.proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(self.port),
+                                          "--source", "127.0.0.1", "--rx-threads", "4", "--workers", "2",
+                                          "--name", self.name, "--ring-mib", "16"], stderr=subprocess.PIPE)
+            deadline = time.monotonic() + 10
+            while not stream_shm.ready(self.name):
+                self.assertLess(time.monotonic(), deadline, "source receiver did not start")
+                time.sleep(0.05)
+            self.shm = Shm(self.name)
+            for seq in range(400):
+                words = noise_words(seq)
+                payload = struct.pack("<2048I", *words)
+                senders[seq % 4].sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload,
+                                       ("127.0.0.1", self.port))
+                if seq == 0:
+                    self.wait_newest(1)
+                elif seq % 16 == 15:
+                    time.sleep(0.002)
+            self.wait_newest(400)
+            self.assertEqual(self.shm.get("lost"), 0)
+            self.assertEqual(self.shm.get("slices"), 400)
+            for seq in range(400):
+                self.assertEqual(self.shm.samples(seq), unpacked(noise_words(seq)))
+        finally:
+            for sender in senders:
+                sender.close()
 
 
 if __name__ == "__main__":

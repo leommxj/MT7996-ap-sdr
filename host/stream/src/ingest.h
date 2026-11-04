@@ -45,10 +45,10 @@ private:
     std::unique_ptr<std::atomic<uint64_t>[]> tags_;
 };
 
-// Receives the stream on IP:PORT with several threads (SO_REUSEPORT; the unit cycles its source
-// port so the flows spread over them) and files every completion into the ring by its sequence
-// number. A run starts with the first completion after a second of silence, after a jump in
-// sequence, or after restart_run().
+// Receives the stream on IP:PORT and files every completion into the ring by its sequence number.
+// With source_ip, each thread connects to one source port; otherwise Linux distributes flows
+// with SO_REUSEPORT and Darwin shares one socket. A run starts after a second of silence,
+// a jump in sequence, or restart_run().
 class Ingest {
 public:
     struct Stats {
@@ -73,7 +73,8 @@ public:
         uint64_t run = 0, newest = 0;
     };
 
-    Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads);
+    Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads,
+           const std::string &source_ip = "");
     ~Ingest();
     Ingest(const Ingest &) = delete;
     Ingest &operator=(const Ingest &) = delete;
@@ -92,7 +93,7 @@ private:
     void check(Worker &w, uint64_t run, uint64_t index);
 
     SampleRing &ring_;
-    const std::string bind_ip_;
+    const std::string bind_ip_, source_ip_;
     const unsigned port_, threads_;
     std::atomic<bool> stopping_{false};
     std::vector<std::unique_ptr<Worker>> workers_;
