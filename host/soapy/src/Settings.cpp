@@ -251,6 +251,7 @@ std::vector<std::string> SoapyW1700K::listFrequencies(const int, const size_t) c
 
 void SoapyW1700K::setFrequency(const int, const size_t, const double frequency, const SoapySDR::Kwargs &)
 {
+    auto reading = pause_reads();
     std::lock_guard<std::mutex> lock(settings_mutex_);
     if (!select_band()) return;
     // The radio tunes only inside the band's lock span. A request outside it is moved to the edge
@@ -262,6 +263,7 @@ void SoapyW1700K::setFrequency(const int, const size_t, const double frequency, 
         SoapySDR::logf(SOAPY_SDR_WARNING, "W1700K: %.3f MHz is outside antenna %s (%.3f to %.3f MHz); using %.3f MHz",
                        frequency / 1e6, w1700k::kBandNames[band()], lowest / 1e6, highest / 1e6, lo / 1e6);
     change({"tune", std::to_string(std::llround(lo))});
+    discard_stream();
 }
 
 void SoapyW1700K::setFrequency(const int direction, const size_t channel, const std::string &, const double frequency,

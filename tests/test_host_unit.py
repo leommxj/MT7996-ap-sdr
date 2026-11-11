@@ -6,6 +6,7 @@ ssh makes an inherited stdin non-blocking; in `w1700k serve` that stdin is the r
 and the next empty read then ends the session as if the web server had closed it.
 """
 import io
+import json
 import subprocess
 import sys
 import tarfile
@@ -76,6 +77,49 @@ class Batch(unittest.TestCase):
         self.assertEqual((first.exit, first.stdout, first.data), (0, b'hi\n', b'data'))
         self.assertNotEqual(second.exit, 0)
         self.assertIsNone(third)
+
+
+class PersistentWriter(unittest.TestCase):
+    def test_updates_are_confirmed_and_shell_text_is_literal(self):
+        transport = unit.Unit(config.parse({}).unit)
+
+        def popen(command):
+            return subprocess.Popen(['sh', '-c', command], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, text=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state's file.json"
+            marker = Path(directory) / 'unexpected'
+            with mock.patch.object(transport, 'popen', side_effect=popen) as start:
+                writer = transport.writer(str(path))
+                try:
+                    for text in (json.dumps({'value': f'$(touch {marker}) `touch {marker}` \\n'}), '{"next":2}'):
+                        writer.write(text)
+                        self.assertEqual(path.read_text(), text)
+                    with self.assertRaises(ValueError):
+                        writer.write('one\ntwo')
+                    self.assertEqual(path.read_text(), '{"next":2}')
+                finally:
+                    writer.close()
+                self.assertEqual(start.call_count, 1)
+            self.assertFalse(marker.exists())
+            self.assertEqual(list(Path(directory).glob('*.part.*')), [])
+
+    def test_lost_confirmation_is_reported_without_replaying_the_write(self):
+        transport = unit.Unit(config.parse({}).unit)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            process = subprocess.Popen(['sh', '-c', 'IFS= read -r line; printf \'%s\' "$line" > "$1"',
+                                        'sh', str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            with mock.patch.object(transport, 'popen', return_value=process) as start:
+                writer = transport.writer(str(path))
+                try:
+                    with self.assertRaisesRegex(unit.UnitError, 'before confirmation'):
+                        writer.write('{"applied":true}')
+                    self.assertEqual(path.read_text(), '{"applied":true}')
+                    self.assertEqual(start.call_count, 1)
+                finally:
+                    writer.close()
 
 
 if __name__ == '__main__':

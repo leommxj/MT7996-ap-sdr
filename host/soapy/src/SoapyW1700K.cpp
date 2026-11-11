@@ -32,10 +32,12 @@ std::string command_path(const SoapySDR::Kwargs &args)
 }  // namespace
 
 SoapyW1700K::SoapyW1700K(const SoapySDR::Kwargs &args)
-    : controller_(command_path(args)),
+    : controller_(command_path(args), argument(args, "control", "serve") != "cli"),
       shm_name_(argument(args, "shm", W1700K_STREAM_NAME)),
       flatten_(w1700k::is_true(argument(args, "flatten", "false")))
 {
+    const auto control = argument(args, "control", "serve");
+    if (control != "serve" && control != "cli") throw std::runtime_error("W1700K: control is serve or cli");
     // band=0|1|2 fixes the device to a band; band=all (or no band=) leaves all three antennas.
     const std::string fixed = argument(args, "band", "all");
     if (fixed == "0" || fixed == "1" || fixed == "2") fixed_band_ = fixed[0] - '0';

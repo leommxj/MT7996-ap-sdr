@@ -32,6 +32,10 @@ Build the firmware first (`make -C firmware`); the host reads `firmware/build/fi
 
 All ssh traffic shares one ControlMaster connection. The socket lives in `$XDG_RUNTIME_DIR`
 when available, otherwise in `~/.cache/w1700k` on macOS or a per-user temporary directory on Linux.
+Closing a controller closes its RF and state-writing sessions. The shared SSH connection stays
+open until it has been idle for 600 seconds; `Unit.close()` closes it immediately.
+State updates reuse one SSH channel. Each update atomically replaces the unit's RAM state file
+before the operation returns. Failed writes report an error without repeating the hardware command.
 
 **Calibration EEPROM.** Each unit carries its own RF calibration, a 16 KiB EEPROM image
 (7680 bytes used) in the factory `calibration` partition at NAND 0x405000. `init/install`
@@ -127,12 +131,14 @@ analog filter. Defaults, all set by every load:
 ## `w1700k serve`
 
 One JSON object per line on stdin; one reply per request `{"id":N,"ok":true,"state":STATE}` or
-`{"id":N,"ok":false,"error":"..."}`; events without `id` in between. `status` is answered
-immediately; other requests run one at a time in order.
+`{"id":N,"ok":false,"error":"..."}`; events without `id` in between. Plain `status` returns the
+cached snapshot immediately. `status` with `rf:true` waits for startup attachment, reads RF
+registers and returns them as `rf_registers`; it and other operations run one at a time in order.
 
 | request | |
 |---|---|
 | `{"id":1,"op":"status"}` | |
+| `{"id":9,"op":"status","rf":true}` | hardware RF status and the attached receiver state |
 | `{"id":2,"op":"load","band":1}` | `band` optional |
 | `{"id":3,"op":"configure","band":2,"sample_rate":320000000,"capture_rate":640000000,"lo_hz":6105000000}` | `sample_rate`, `capture_rate` (default: the sample rate; 640000000 with 320000000 is 640/2 on band 2), `lo_hz` optional; restarts a running stream for a new rate |
 | `{"id":4,"op":"start"}` | |

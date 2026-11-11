@@ -473,6 +473,27 @@ class BandSwitch(ControllerTest):
 
 
 class Serve(ControllerTest):
+    def test_rf_status_waits_for_attach_and_reads_hardware(self):
+        self.loaded()
+        stdout = io.StringIO()
+        stdin = io.StringIO('{"id":1,"op":"status","rf":true}\n')
+        other = Controller(self.config, unit=self.unit)
+        serve(other, stdin, stdout)
+        reply = next(json.loads(line) for line in stdout.getvalue().splitlines() if '"id"' in line)
+        self.assertTrue(reply['ok'], reply)
+        self.assertTrue(reply['state']['radio']['loaded'])
+        self.assertEqual(reply['rf_registers']['band'], self.ctl.band)
+        self.assertIn((rf.RF_STATUS, self.ctl.band, 0, 0), self.dev.rf_ops)
+
+    def test_close_releases_session_without_stopping_shared_ssh(self):
+        self.loaded()
+        with patch.object(self.unit, 'close') as close, patch.object(self.ctl._writer, 'close') as writer_close:
+            self.ctl.close()
+        close.assert_not_called()
+        writer_close.assert_called_once()
+        self.assertIsNone(self.ctl._ctl)
+        self.assertIsNone(self.ctl._writer)
+
     def test_protocol(self):
         lines = [{'id': 1, 'op': 'status'}, {'id': 2, 'op': 'load', 'band': 0}, {'id': 3, 'op': 'start'},
                  {'id': 4, 'op': 'tune', 'hz': 2_450_000_000}, {'id': 5, 'op': 'bogus'},

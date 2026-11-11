@@ -77,6 +77,7 @@ class Controller:
         self.radio = Radio(self.unit)
         self.stream = Stream(self.unit)
         self._ctl = None
+        self._writer = None
         self.boot_id = None
         self.loaded = False
         self.bands = dict(DEFAULT_BANDS)
@@ -123,7 +124,14 @@ class Controller:
                   'bands': {str(b): c.as_dict() for b, c in self.bands.items()},
                   'bands_ready': self.bands_ready, 'packing': self.packing,
                   'rf': {str(b): v for b, v in self.rf.items()}, 'synth_locked': self.synth_locked}
-        self.unit.push(json.dumps(record).encode(), STATE_FILE)
+        if self._writer is None:
+            self._writer = self.unit.writer(STATE_FILE)
+        try:
+            self._writer.write(json.dumps(record))
+        except Exception:
+            self._writer.close()
+            self._writer = None
+            raise
 
     def attach(self):
         """Adopt the receiver state the unit holds for this boot, and a stream already running."""
@@ -226,7 +234,9 @@ class Controller:
 
     def close(self):
         self._close_ctl()
-        self.unit.close()
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
 
     # --- implementation ---
 
@@ -542,6 +552,8 @@ def handle(controller, request):
     """Run one request; the reply fields beyond id/ok."""
     op = request.get('op')
     if op == 'status':
+        if request.get('rf'):
+            return {'rf_registers': controller.rf_status()}
         return {}
     if op == 'load':
         controller.load(_require(request, 'band', int, optional=True))
@@ -611,7 +623,7 @@ def serve(controller, stdin=None, stdout=None, poll_seconds=2.0):
         except ValueError as exc:
             send({'event': 'log', 'level': 'error', 'text': f'bad request: {exc}'})
             continue
-        if request.get('op') == 'status':
+        if request.get('op') == 'status' and not request.get('rf'):
             send({'id': request['id'], 'ok': True, 'state': controller.snapshot})
         else:
             requests.put(request)

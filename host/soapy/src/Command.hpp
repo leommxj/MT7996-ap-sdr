@@ -4,12 +4,12 @@
 // state it reports.
 //
 // The radio itself is controlled over ssh by the host-side `w1700k` program (host/w1700k in the w1700k-sdr project); its
-// state lives on the unit. This module therefore changes the radio by running one short-lived
-// `w1700k` process per change and reads the new state from that process's JSON reply. Nothing here
-// touches the stream; that is Streaming.cpp.
+// state lives on the unit. One `w1700k serve` process carries requests and state replies for the
+// lifetime of a device. Nothing here touches the stream; that is Streaming.cpp.
 #pragma once
 
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -51,13 +51,17 @@ void parse_reply(const std::string &json_text, RadioState &state);
 int run_process(const std::vector<std::string> &argv, std::chrono::seconds timeout, std::string &out,
                 std::string &err);
 
-// Runs `w1700k` commands one at a time and holds the state they report.
+class CommandSession;
+
+// Serializes control requests and holds the state they report.
 class Controller {
 public:
-    explicit Controller(std::string command) : command_(std::move(command)) {}
+    explicit Controller(std::string command, bool persistent = true,
+                        std::chrono::milliseconds timeout = std::chrono::seconds(30));
+    ~Controller();
 
-    // Runs `w1700k <args>` (for example {"tune", "5250000000"}) and applies its reply. Throws
-    // std::runtime_error, with the command's own error text, if it fails.
+    // Sends the equivalent of `w1700k <args>` and applies its reply. A broken session is closed;
+    // the next call reconnects. An operation whose outcome is unknown is never replayed.
     void run(const std::vector<std::string> &args);
 
     // Reads the unit's current state (`w1700k status --rf`).
@@ -70,6 +74,9 @@ public:
 
 private:
     const std::string command_;
+    const bool persistent_;
+    const std::chrono::milliseconds timeout_;
+    std::unique_ptr<CommandSession> session_;
     std::mutex run_mutex_;           // one command at a time
     mutable std::mutex state_mutex_; // guards state_ only, so readers do not wait for a command
     RadioState state_;

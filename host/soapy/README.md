@@ -75,11 +75,15 @@ by arguments (GNU Radio, scripts) should ask for it. A request that names no ban
 the 2.4G device.
 
 Device arguments: `band=0|1|2|all`, `flatten=true`, `shm=/w1700k-stream`, `cmd=/path/to/w1700k`.
+The default `control=serve` keeps one `w1700k serve` process and its RF control session open per
+device. Update `host/w1700k` together with this module. `control=cli` runs separate commands for
+compatibility with older host tools and command wrappers. Both modes use SSH; IQ travels over UDP.
+State updates reuse a second SSH channel and wait for the file replacement to finish.
 
 | SoapySDR | W1700K |
 |---|---|
 | antenna `2.4G`, `5G`, `6G` | the band captured |
-| frequency | the band's LO (a tune takes a few hundred ms) |
+| frequency | the band's LO; synchronous tuning through the persistent control session |
 | sample rate 40, 80, 160, 320 Msps | the radio's rate (a running stream restarts at the new rate) |
 | bandwidth 20, 40, 80, 160, 320 MHz; 0 | the analog filter; 0 is the filter as wide as the sample rate |
 | gain `LNA` 0..4, `LPF` 0..9; gain mode | forced steps (not dB); AGC |
@@ -104,12 +108,17 @@ Device arguments: `band=0|1|2|all`, `flatten=true`, `shm=/w1700k-stream`, `cmd=/
   changed the radio. A successful unchanged rate does not introduce a gap. This is a host discard
   boundary, not a hardware timestamp for the first sample at the new rate. Applied gain changes
   (including AGC and failed commands) use the same discard boundary; cached gain requests while
-  AGC is on do not interrupt reads. External control changes still need coordination with the reader.
+  AGC is on do not interrupt reads. Frequency setters also discard queued samples and report
+  an overflow, including after failure. UDP packets already in transit may still contain samples
+  captured before the change. External control changes need coordination with the reader.
   A gain change at 320 Msps also waits for the packed stream's existing WA shutdown hold (about 3 s).
 - **Errors.** A command to the radio that fails is logged (with the command's own explanation) and
   not thrown, because SDR++ does not catch exceptions from setters; the getters keep reporting the
   radio's real state. Misuse of the API (an antenna or gain that does not exist, a transmit stream)
   throws.
+- **Control session.** Each setter waits for its reply. A timeout, closed child or invalid reply
+  closes the session; the next request opens another. Failed requests are never retried automatically.
+  The shared SSH connection stays available until it has been idle for 600 seconds.
 
 ## SDR++
 
@@ -139,7 +148,8 @@ Use `--band all --antenna 5G --freq 5180000000` to select an antenna explicitly.
 | `src/SoapyW1700K.hpp` | the device class, and the design notes: paths, threading, errors |
 | `src/Settings.cpp` | band, frequency, rate, filter, gain, settings |
 | `src/Streaming.cpp` | the stream: shared-memory ring, seqlock reads, gap reporting |
-| `src/Command.cpp` | running `w1700k` (timeout, process group), parsing its reply |
+| `src/Command.cpp` | control requests, CLI compatibility, parsing and publishing state |
+| `src/Session.cpp` | persistent child, request IDs, deadlines, events and process cleanup |
 | `src/Registration.cpp` | enumeration and creation |
 
 `W1700K_STREAM_BIN=/path/to/w1700k-stream python3 -m unittest discover -s tests` builds the module

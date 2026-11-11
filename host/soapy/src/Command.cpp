@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "Command.hpp"
+#include "Session.hpp"
 #include "w1700k_posix.h"
 
 #include <nlohmann/json.hpp>
@@ -26,9 +27,26 @@ namespace {
 
 using json = nlohmann::json;
 
-// How long one `w1700k` command may take. A tune or a rate change takes well under a second; the
-// command's own ssh timeouts end a dead unit in about ten. This only stops a hang.
-constexpr std::chrono::seconds kCommandTimeout{30};
+json request_for(const std::vector<std::string> &args)
+{
+    const auto &op = args.at(0);
+    json request{{"op", op}};
+    if (op == "tune") request["hz"] = std::stoll(args.at(1));
+    else if (op == "filter") request["mhz"] = std::stoi(args.at(1));
+    else if (op == "band") {
+        request["op"] = "configure";
+        request["band"] = std::stoi(args.at(1));
+        if (args.size() > 2) request["sample_rate"] = std::stoll(args.at(3)) * 1000000;
+    } else if (op == "gain") {
+        if (args.at(1) == "--agc") request["agc"] = true;
+        else {
+            request["lna"] = std::stoi(args.at(2));
+            request["lpf"] = std::stoi(args.at(4));
+        }
+    } else if (op == "status") request["rf"] = true;
+    else if (op != "start" && op != "stop") throw std::runtime_error("unsupported control command: " + op);
+    return request;
+}
 
 // Reads whatever is available on `fd` into `into`. Returns false at end of file.
 bool drain(int fd, std::string &into)
@@ -197,14 +215,44 @@ void parse_reply(const std::string &json_text, RadioState &state)
     state = next;
 }
 
+Controller::Controller(std::string command, bool persistent, std::chrono::milliseconds timeout)
+    : command_(std::move(command)), persistent_(persistent), timeout_(timeout) {}
+
+Controller::~Controller() = default;
+
 void Controller::run(const std::vector<std::string> &args)
 {
     std::lock_guard<std::mutex> one_at_a_time(run_mutex_);
+    if (persistent_) {
+        json reply;
+        try {
+            if (!session_) session_ = std::make_unique<CommandSession>(command_);
+            reply = session_->request(request_for(args), timeout_);
+        } catch (...) {
+            session_.reset();
+            throw;
+        }
+        if (!reply["ok"].get<bool>()) throw std::runtime_error(reply.value("error", "control request failed"));
+        if (!reply.contains("state") || !reply["state"].is_object()) {
+            session_.reset();
+            throw std::runtime_error("w1700k serve: reply has no state");
+        }
+        RadioState next = state();
+        try {
+            parse_reply(reply["state"].dump(), next);
+        } catch (...) {
+            session_.reset();
+            throw;
+        }
+        std::lock_guard<std::mutex> publish(state_mutex_);
+        state_ = next;
+        return;
+    }
     std::vector<std::string> argv{command_};
     argv.insert(argv.end(), args.begin(), args.end());
 
     std::string out, err;
-    const int status = run_process(argv, kCommandTimeout, out, err);
+    const int status = run_process(argv, std::chrono::ceil<std::chrono::seconds>(timeout_), out, err);
     if (status != 0) {
         const std::string why = last_line(err);
         throw std::runtime_error("'" + command_ + " " + args.front() + "' failed" +

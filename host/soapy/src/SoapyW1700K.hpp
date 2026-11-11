@@ -8,8 +8,8 @@
 //     in POSIX shared memory (include/w1700k_stream.h, a copy of the w1700k-sdr project's header). This module maps that memory and
 //     copies samples out of it; see Streaming.cpp. It never talks to the unit for samples.
 //
-//   * Control: band, frequency, sample rate, filter and gain are changed by running the host's
-//     `w1700k` command, which controls the unit over ssh; see Command.hpp and Settings.cpp.
+//   * Control: band, frequency, sample rate, filter and gain use one host `w1700k serve` process,
+//     which controls the unit over ssh; see Command.hpp and Settings.cpp.
 //
 // Device arguments (all optional):
 //
@@ -17,6 +17,7 @@
 //   flatten=true      have the stream service correct the decimation filter's roll-off
 //   shm=NAME          the stream service's shared-memory object, default /w1700k-stream
 //   cmd=PATH          the `w1700k` command; default $W1700K_CMD, else the path compiled in
+//   control=serve|cli persistent session (default), or separate CLI invocations for older tools
 //
 // Bands. The radio has three RF front ends. SoapySDR has one frequency range per channel and none
 // per antenna, so this module offers each band as a device of its own ("W1700K 2.4G", "W1700K 5G",

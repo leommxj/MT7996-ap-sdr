@@ -6,6 +6,8 @@ order, with a lost slice reported as an overflow.
 
 Needs the stream service's binary: set W1700K_STREAM_BIN to it, or have `w1700k-stream` in PATH; the
 tests are skipped without it. The service takes up to a minute to start (it plans its FFTs)."""
+import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -41,32 +43,64 @@ STATE = {
 # A stand-in for the `w1700k` command: logs its arguments, applies the few commands the module sends to a
 # state file, prints the state. FAKE_FAIL=<command> makes that command fail the way the real one does.
 FAKE_COMMAND = r'''#!/usr/bin/env python3
-import json, os, sys, time
+import fcntl, json, os, sys, time
 state_path, log_path = os.environ["FAKE_STATE"], os.environ["FAKE_LOG"]
 args = sys.argv[1:]
-with open(log_path, "a") as log:
-    log.write(" ".join(args) + "\n")
-if os.environ.get("FAKE_FAIL") == args[0]:
-    sys.stderr.write("error: band 1 synthesizer unlocked: the VCO did not lock\n")
-    sys.exit(1)
-state = json.load(open(state_path))
-if args[0] == "tune":
-    state["radio"]["lo_hz"] = state["rf"]["lo_hz"] = int(args[1])
-elif args[0] == "band":
-    time.sleep(0.1)
-    state["radio"]["band"] = int(args[1])
-    if "--rate" in args:
-        state["radio"]["sample_rate"] = state["radio"]["capture_rate"] = int(args[args.index("--rate") + 1]) * 1000000
-elif args[0] == "start":
-    state["stream"]["running"] = True
-elif args[0] == "gain":
-    time.sleep(0.1)
-    automatic = "--agc" in args
-    state["rf"]["agc"] = automatic
-    state["rf"]["lna"] = None if automatic else int(args[args.index("--lna") + 1])
-    state["rf"]["lpf"] = None if automatic else int(args[args.index("--lpf") + 1])
-json.dump(state, open(state_path, "w"))
-print(json.dumps(state))
+def apply(args):
+    with open(log_path, "a") as log:
+        log.write(" ".join(args) + "\n")
+    if os.environ.get("FAKE_FAIL") == args[0]:
+        raise RuntimeError("band 1 synthesizer unlocked: the VCO did not lock")
+    state = json.load(open(state_path))
+    if args[0] == "tune":
+        time.sleep(0.1)
+        state["radio"]["lo_hz"] = state["rf"]["lo_hz"] = int(args[1])
+    elif args[0] == "band":
+        time.sleep(0.1)
+        state["radio"]["band"] = int(args[1])
+        if "--rate" in args:
+            state["radio"]["sample_rate"] = state["radio"]["capture_rate"] = int(args[args.index("--rate") + 1]) * 1000000
+    elif args[0] == "start":
+        state["stream"]["running"] = True
+    elif args[0] == "gain":
+        time.sleep(0.1)
+        automatic = "--agc" in args
+        state["rf"]["agc"] = automatic
+        state["rf"]["lna"] = None if automatic else int(args[args.index("--lna") + 1])
+        state["rf"]["lpf"] = None if automatic else int(args[args.index("--lpf") + 1])
+    with open(state_path + ".lock", "a") as gate:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        with open(state_path, "w") as output:
+            json.dump(state, output)
+    return state
+
+if args == ["serve"]:
+    with open(log_path + ".sessions", "a") as log:
+        log.write(str(os.getpid()) + "\n")
+    for line in sys.stdin:
+        request = json.loads(line)
+        op = request["op"]
+        argv = [op]
+        if op == "status": argv += ["--rf"]
+        elif op == "tune": argv += [str(request["hz"])]
+        elif op == "filter": argv += [str(request["mhz"])]
+        elif op == "configure":
+            argv = ["band", str(request["band"])]
+            if "sample_rate" in request: argv += ["--rate", str(request["sample_rate"] // 1000000)]
+        elif op == "gain":
+            argv += ["--agc"] if request.get("agc") else ["--lna", str(request["lna"]), "--lpf", str(request["lpf"])]
+        print(json.dumps({"event": "state", "state": json.load(open(state_path))}), flush=True)
+        try:
+            reply = dict(id=request["id"], ok=True, state=apply(argv))
+        except RuntimeError as error:
+            reply = dict(id=request["id"], ok=False, error=str(error))
+        print(json.dumps(reply), flush=True)
+else:
+    try:
+        print(json.dumps(apply(args)))
+    except RuntimeError as error:
+        sys.stderr.write(str(error) + "\n")
+        sys.exit(1)
 '''
 
 
@@ -92,53 +126,68 @@ def free_udp_port():
     return port
 
 
+@contextlib.contextmanager
+def source_state(path):
+    if path is None:
+        yield
+        return
+    # A simulated radio cannot emit an old packet after acknowledging its new state.
+    with open(path + ".lock", "a") as gate:
+        fcntl.flock(gate, fcntl.LOCK_SH)
+        yield
+
+
 class Sender(threading.Thread):
     """Sends the export's slices without end, at about 4000 a second: slice s is I = s % 8192 and Q = the
     sample's index in the slice, so a reader can check order and continuity. With `lose_every` a slice
     of every that many is never sent (a lost slice, wherever a reader happens to start); `event` is
     sent as a firmware event."""
 
-    def __init__(self, port, lose_every=None, event=None, rate_state=None, gain_state=None):
+    def __init__(self, port, lose_every=None, event=None, rate_state=None, gain_state=None, frequency_state=None):
         super().__init__(daemon=True)
         self.port, self.lose_every, self.event = port, lose_every, event
         self.stop_flag = threading.Event()
         self.sent = 0
         self.rate_state = rate_state
         self.gain_state = gain_state
+        self.frequency_state = frequency_state
 
     def run(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         seq = 0
         while not self.stop_flag.is_set():
-            if not (self.lose_every and seq % self.lose_every == self.lose_every // 2):
-                if seq == self.event:
-                    payload = b"\x00" * 64
-                else:
-                    value = (seq - int(self.event is not None and seq > self.event)) % 8192
-                    if self.rate_state:
-                        try:
-                            with open(self.rate_state) as f:
-                                value = json.load(f)["radio"]["sample_rate"] // 1000000
-                        except json.JSONDecodeError:
-                            continue
-                    if self.gain_state:
-                        try:
-                            with open(self.gain_state) as f:
-                                gain = json.load(f)["rf"]
-                            value = 100 if gain["agc"] else gain["lna"] * 10 + gain["lpf"]
-                        except json.JSONDecodeError:
-                            continue
-                    words = [(value << 16) | n for n in range(SLICE)]
-                    if self.rate_state and value == 320 and seq % 2:
-                        words = [words[g + k] | ((words[g + 7] << (14 - 2 * k)) & 0xC000C000)
-                                 for g in range(0, SLICE, 8) for k in range(7)]
-                    payload = struct.pack("<%dI" % len(words), *words)
-                sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
+            with source_state(self.rate_state or self.gain_state or self.frequency_state):
+                self.send(sock, seq)
             seq += 1
             self.sent = seq
             if seq % 16 == 0:
                 time.sleep(0.004)
         sock.close()
+
+    def send(self, sock, seq):
+        if self.lose_every and seq % self.lose_every == self.lose_every // 2:
+            return
+        if seq == self.event:
+            payload = b"\x00" * 64
+        else:
+            value = (seq - int(self.event is not None and seq > self.event)) % 8192
+            path = self.rate_state or self.gain_state or self.frequency_state
+            if path:
+                with open(path) as f:
+                    state = json.load(f)
+                if self.rate_state:
+                    value = state["radio"]["sample_rate"] // 1000000
+                elif self.gain_state:
+                    gain = state["rf"]
+                    value = 100 if gain["agc"] else gain["lna"] * 10 + gain["lpf"]
+                else:
+                    value = state["radio"]["lo_hz"] // 1000000
+            words = [(value << 16) | n for n in range(SLICE)]
+            if self.rate_state and value == 320 and seq % 2:
+                words = [words[g + k] | ((words[g + 7] << (14 - 2 * k)) & 0xC000C000)
+                         for g in range(0, SLICE, 8) for k in range(7)]
+            payload = struct.pack("<%dI" % len(words), *words)
+        sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
 
 
 @unittest.skipIf(build_problem(), build_problem())
@@ -330,6 +379,41 @@ class SoapyModuleTest(unittest.TestCase):
                 self.assertGreater(row["samples"], 10000, row)
                 self.assertLess(row["change_seconds"], 1, row)
                 self.assertGreater(row["same_rate_read"], 0, row)
+
+    def test_tunes_reuse_session_and_discard_old_frequency_samples(self):
+        self.start_sender(frequency_state=self.state_path)
+        for fmt in ("CS16", "CF32"):
+            result = self.run_client("tunes", self.device(1), fmt)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for row in map(json.loads, result.stdout.splitlines()):
+                self.assertEqual((row["first"], row["overflows"], row["bad_samples"]), (-4, 1, 0), row)
+                self.assertGreater(row["samples"], 10000, row)
+        with open(self.log_path + ".sessions") as log:
+            self.assertEqual(len(log.readlines()), 2, "one serve process per device, reused by every tune")
+
+    def test_failed_tune_still_discards_old_samples(self):
+        self.start_sender(frequency_state=self.state_path)
+        result = self.run_client("tunes", self.device(1), "CS16", fail="tune")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for row in map(json.loads, result.stdout.splitlines()):
+            self.assertEqual((row["rate"], row["first"], row["overflows"], row["bad_samples"]),
+                             (5250000000, -4, 1, 0), row)
+
+    def test_concurrent_reads_and_tunes(self):
+        self.start_sender(frequency_state=self.state_path)
+        for fmt in ("CS16", "CF32"):
+            result = self.run_client("tunes-concurrent", self.device(1), fmt)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            row = json.loads(result.stdout)
+            self.assertGreater(row["samples"], 10000, row)
+            self.assertEqual((row["overflows"], row["errors"], row["bad_samples"]), (6, 0, 0), row)
+
+    def test_cli_mode_keeps_legacy_command_compatibility(self):
+        self.start_sender()
+        result = self.run_client("tune", self.device(1) + ",control=cli", "5300000000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["frequency"], 5300000000)
+        self.assertFalse(os.path.exists(self.log_path + ".sessions"))
 
     def test_gain_changes_discard_backlog_and_report_boundary(self):
         self.start_sender(gain_state=self.state_path)

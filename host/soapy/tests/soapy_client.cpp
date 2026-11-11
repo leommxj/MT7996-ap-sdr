@@ -140,15 +140,17 @@ int gains(SoapySDR::Device *device, const std::string &format)
     return 0;
 }
 
-int gains_concurrent(SoapySDR::Device *device, const std::string &format)
+int settings_concurrent(SoapySDR::Device *device, const std::string &format, bool tuning)
 {
     const bool cf32 = format == "CF32";
-    device->setGainMode(SOAPY_SDR_RX, 0, false);
-    device->setGain(SOAPY_SDR_RX, 0, "LPF", 5);
+    if (!tuning) {
+        device->setGainMode(SOAPY_SDR_RX, 0, false);
+        device->setGain(SOAPY_SDR_RX, 0, "LPF", 5);
+    }
     auto *rx = device->setupStream(SOAPY_SDR_RX, format);
     if (device->activateStream(rx) != 0) return 1;
     std::atomic<bool> stop{false};
-    std::atomic<int> generation{0}, expected{45};
+    std::atomic<int> generation{0}, expected{tuning ? int(device->getFrequency(SOAPY_SDR_RX, 0) / 1e6) : 45};
     long long samples = 0, overflows = 0, errors = 0, bad = 0;
     std::thread reader([&] {
         std::vector<int16_t> cs(6000);
@@ -176,9 +178,10 @@ int gains_concurrent(SoapySDR::Device *device, const std::string &format)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         ++generation;
         const auto start = std::chrono::steady_clock::now();
-        device->setGain(SOAPY_SDR_RX, 0, "LNA", lna);
+        if (tuning) device->setFrequency(SOAPY_SDR_RX, 0, (5250 + lna) * 1e6);
+        else device->setGain(SOAPY_SDR_RX, 0, "LNA", lna);
         longest = std::max(longest, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
-        expected = lna * 10 + 5;
+        expected = tuning ? 5250 + lna : lna * 10 + 5;
         ++generation;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -191,7 +194,7 @@ int gains_concurrent(SoapySDR::Device *device, const std::string &format)
     return 0;
 }
 
-int rates(SoapySDR::Device *device, const std::string &format)
+int changes(SoapySDR::Device *device, const std::string &format, bool tuning)
 {
     const bool cf32 = format == "CF32";
     auto *rx = device->setupStream(SOAPY_SDR_RX, format);
@@ -205,9 +208,10 @@ int rates(SoapySDR::Device *device, const std::string &format)
         device->readStream(rx, buffers, 1000, flags, ns, 100000);
         std::this_thread::sleep_for(std::chrono::milliseconds(60));
         const auto changed = std::chrono::steady_clock::now();
-        device->setSampleRate(SOAPY_SDR_RX, 0, rate);
+        if (tuning) device->setFrequency(SOAPY_SDR_RX, 0, 5250e6 + rate);
+        else device->setSampleRate(SOAPY_SDR_RX, 0, rate);
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - changed).count();
-        const double actual = device->getSampleRate(SOAPY_SDR_RX, 0);
+        const double actual = tuning ? device->getFrequency(SOAPY_SDR_RX, 0) : device->getSampleRate(SOAPY_SDR_RX, 0);
         const int first = device->readStream(rx, buffers, 3000, flags, ns, 100000);
         int overflows = first == SOAPY_SDR_OVERFLOW, bad = 0, samples = 0;
         for (int n = 0; n < 12; ++n) {
@@ -220,7 +224,7 @@ int rates(SoapySDR::Device *device, const std::string &format)
                 if (i != int(actual / 1e6)) ++bad;
             }
         }
-        device->setSampleRate(SOAPY_SDR_RX, 0, actual);
+        if (!tuning) device->setSampleRate(SOAPY_SDR_RX, 0, actual);
         const int same = device->readStream(rx, buffers, 3000, flags, ns, 100000);
         std::printf("{\"rate\": %.0f, \"change_seconds\": %.6f, \"first\": %d, \"overflows\": %d, "
                     "\"samples\": %d, \"bad_samples\": %d, \"same_rate_read\": %d}\n",
@@ -260,11 +264,15 @@ int main(int argc, char **argv)
     } else if (mode == "stream" && argc == 5) {
         status = stream(device, argv[3], std::atof(argv[4]));
     } else if (mode == "rates" && argc == 4) {
-        status = rates(device, argv[3]);
+        status = changes(device, argv[3], false);
+    } else if (mode == "tunes" && argc == 4) {
+        status = changes(device, argv[3], true);
     } else if (mode == "gains" && argc == 4) {
         status = gains(device, argv[3]);
     } else if (mode == "gains-concurrent" && argc == 4) {
-        status = gains_concurrent(device, argv[3]);
+        status = settings_concurrent(device, argv[3], false);
+    } else if (mode == "tunes-concurrent" && argc == 4) {
+        status = settings_concurrent(device, argv[3], true);
     } else {
         status = 2;
     }

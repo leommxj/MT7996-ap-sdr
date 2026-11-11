@@ -564,6 +564,18 @@ class FakeUnit:
         self.log.append(f'push {remote}')
         self.files[remote] = bytes(data)
 
+    def writer(self, remote):
+        unit = self
+
+        class Writer:
+            def write(self, text):
+                unit.push(text.encode(), remote)
+
+            def close(self):
+                pass
+
+        return Writer()
+
     def read(self, remote, missing_ok=False):
         return self.files.get(remote, b'')
 

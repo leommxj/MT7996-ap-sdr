@@ -82,6 +82,53 @@ def parse_batch(archive, count):
     return out
 
 
+class FileWriter:
+    """Atomic single-line file updates over one SSH channel, acknowledged after each rename."""
+
+    def __init__(self, unit, remote):
+        directory = shlex.quote(str(Path(remote).parent))
+        path = shlex.quote(remote)
+        script = f'''umask 077
+mkdir -p {directory} || exit 1
+state_file={path}
+state_part="$state_file.part.$$"
+trap 'rm -f "$state_part"' EXIT
+while IFS= read -r state_line; do
+    if printf '%s' "$state_line" > "$state_part" && mv "$state_part" "$state_file"; then
+        printf 'ok\\n'
+    else
+        printf 'error\\n'
+        exit 1
+    fi
+done
+'''
+        self.process = unit.popen(script)
+
+    def write(self, text):
+        if '\n' in text or '\r' in text:
+            raise ValueError('a file update must be one line')
+        try:
+            self.process.stdin.write(text + '\n')
+            self.process.stdin.flush()
+            answer = self.process.stdout.readline()
+        except OSError as exc:
+            raise UnitError(f'state writer session ended: {exc}') from exc
+        if answer != 'ok\n':
+            raise UnitError('state write failed' if answer else 'state writer session ended before confirmation')
+
+    def close(self):
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.process.wait(1)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.process.stdout.close()
+
+
 class Unit:
     def __init__(self, config):
         self.config = config
@@ -131,6 +178,9 @@ class Unit:
         self.check(f'mkdir -p {directory} && cat > {path}.part{chmod} && mv {path}.part {path}',
                    input=data, timeout=120)
 
+    def writer(self, remote):
+        return FileWriter(self, remote)
+
     def read(self, remote, missing_ok=False):
         """A unit file's bytes (b'' for a missing file when missing_ok)."""
         path = shlex.quote(remote)
@@ -151,6 +201,6 @@ class Unit:
                                 stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
     def close(self):
-        """End the shared connection."""
+        """Explicitly end the shared connection; controllers leave it to ControlPersist."""
         subprocess.run(['ssh', '-o', f'ControlPath={self._control}', '-O', 'exit', self.target], stdin=subprocess.DEVNULL,
                        capture_output=True, timeout=10)
